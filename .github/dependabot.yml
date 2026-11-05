@@ -1,0 +1,69 @@
+version: 2
+
+updates:
+  # Flutter/Dart 依赖。minor 与 patch 合并成一个 PR，major 单独处理。
+  - package-ecosystem: "pub"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    labels:
+      - "flutter"
+    ignore:
+      # m3e_core 1.1.4 与 material_ui 1.8 存在 RoundedPolygon 同名类型冲突。
+      # 待 m3e_core 适配后删除此忽略，并按 UI 组件栈整体验证。
+      - dependency-name: "material_ui"
+        versions:
+          - ">=1.8.0 <1.9.0"
+    groups:
+      material-ui-stack:
+        patterns:
+          - "material_ui"
+          - "m3e_core"
+          - "cupertino_ui"
+      pub-minor-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "material_ui"
+          - "m3e_core"
+          - "cupertino_ui"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Android Gradle 插件和 Maven 依赖。
+  - package-ecosystem: "gradle"
+    directory: "/android"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:15"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 3
+    labels:
+      - "android"
+    groups:
+      gradle-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # 工作流里引用的 GitHub Actions 统一成组更新，避免每个 action 单独开 PR。
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:30"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 2
+    groups:
+      github-actions:
+        patterns:
+          - "*"

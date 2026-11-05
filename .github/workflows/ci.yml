@@ -1,0 +1,158 @@
+name: "CI: Flutter"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 与 pubspec.lock 的来源保持一致，确保 CI 使用 lock 中的确切版本。
+  PUB_HOSTED_URL: https://pub.dev
+
+jobs:
+  changes:
+    name: 判断检查范围
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      android: ${{ steps.filter.outputs.android }}
+      windows: ${{ steps.filter.outputs.windows }}
+      workflow: ${{ steps.filter.outputs.workflow }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: 按改动路径选择检查
+        id: filter
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            code=true
+            android=false
+            windows=false
+            workflow=false
+          else
+            files="$(git diff --name-only \
+              "${{ github.event.pull_request.base.sha }}" \
+              "${{ github.event.pull_request.head.sha }}")"
+            if printf '%s\n' "$files" | grep -Ev \
+              '^(docs/|tools/|assets/images/screenshots/|\.github/)|\.md$|(^|/)LICENSE$'; then
+              code=true
+            else
+              code=false
+            fi
+            if printf '%s\n' "$files" | grep -Eq \
+              '^(android/|pubspec\.yaml$|pubspec\.lock$|\.github/workflows/(ci|android-ci)\.yml$)'; then
+              android=true
+            else
+              android=false
+            fi
+            if printf '%s\n' "$files" | grep -Eq \
+              '^(windows/|pubspec\.yaml$|pubspec\.lock$|\.github/workflows/(ci|windows-ci)\.yml$)'; then
+              windows=true
+            else
+              windows=false
+            fi
+            if printf '%s\n' "$files" | grep -Eq '^(\.github/|tools/)'; then
+              workflow=true
+            else
+              workflow=false
+            fi
+          fi
+          {
+            echo "code=$code"
+            echo "android=$android"
+            echo "windows=$windows"
+            echo "workflow=$workflow"
+          } >> "$GITHUB_OUTPUT"
+
+  check:
+    name: 代码检查（Ubuntu）
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: pubspec.yaml
+          channel: stable
+          cache: true
+          pub-cache: ${{ github.event_name == 'push' }}
+      - run: flutter pub get --enforce-lockfile
+      - name: 检查本地化生成文件
+        shell: bash
+        continue-on-error: true
+        run: |
+          flutter gen-l10n
+          git diff --exit-code -- \
+            lib/l10n/app_localizations.dart \
+            lib/l10n/app_localizations_en.dart \
+            lib/l10n/app_localizations_zh.dart
+      - name: 代码格式检查（dart format）
+        continue-on-error: true
+        run: dart format --output=none --set-exit-if-changed lib test tool
+      - name: 静态分析（flutter analyze）
+        continue-on-error: true
+        run: flutter analyze --fatal-infos --no-pub
+      - name: 单元测试（flutter test）
+        continue-on-error: true
+        run: flutter test --no-pub
+
+  android:
+    name: Android release 构建检查
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/android-ci.yml
+
+  windows:
+    name: Windows release 构建检查
+    needs: changes
+    if: needs.changes.outputs.windows == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/windows-ci.yml
+
+  workflow_lint:
+    name: Workflow Lint
+    needs: changes
+    if: needs.changes.outputs.workflow == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/workflow-lint.yml
+
+  required:
+    name: CI required
+    needs: [changes, check, android, windows, workflow_lint]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 汇总必需检查
+        shell: bash
+        run: |
+          if [[ "${{ needs.changes.result }}" != "success" ]]; then
+            echo "changes job failed: ${{ needs.changes.result }}"
+            exit 1
+          fi
+          for result in \
+            "${{ needs.check.result }}" \
+            "${{ needs.android.result }}" \
+            "${{ needs.windows.result }}" \
+            "${{ needs.workflow_lint.result }}"; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "required job failed: $result"
+              exit 1
+            fi
+          done

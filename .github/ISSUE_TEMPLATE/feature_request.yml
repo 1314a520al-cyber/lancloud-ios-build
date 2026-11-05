@@ -1,0 +1,41 @@
+name: 功能请求
+description: 为这个项目提出一个新功能或改进想法
+title: "[FR] "
+labels: ["enhancement"]
+assignees: ["Tgaisen"]
+type: Feature
+body:
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 检查清单
+      description: 提交前请确认以下事项。
+      options:
+        - label: "已搜索[历史 issue](https://github.com/Tgaisen/LanCloud/issues)，并未发现相同的功能请求"
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 需求描述（必填）
+      description: 请清晰简洁地描述你的需求。
+      placeholder: 例如：每次……都需要手动……，非常不方便。
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 期望描述（必填）
+      description: 请清晰简洁地描述你希望实现的功能。（必填）
+      placeholder: 例如：希望支持……
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 附加内容
+      description: 在此添加有关该功能请求的其他背景信息或截图。

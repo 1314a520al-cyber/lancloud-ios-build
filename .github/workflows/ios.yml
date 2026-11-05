@@ -1,0 +1,35 @@
+name: Build iOS IPA
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter --version && xcodebuild -version
+      - run: flutter pub get
+      - name: Build iOS
+        continue-on-error: true
+        run: flutter build ios --no-codesign --simulator --debug
+      - name: Package IPA
+        if: always()
+        run: |
+          ls -lh build/ios/iphoneos/
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          zip -qry LanCloud-unsigned.ipa Payload
+          ls -lh LanCloud-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lancloud-ios-ipa
+          path: LanCloud-unsigned.ipa
+          retention-days: 30

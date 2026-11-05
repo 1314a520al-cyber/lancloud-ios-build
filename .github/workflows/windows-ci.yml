@@ -1,0 +1,71 @@
+name: "CI: Windows"
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PUB_HOSTED_URL: https://pub.dev
+
+jobs:
+  build:
+    name: Windows release 构建检查
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: 启用开发者模式（符号链接）
+        shell: pwsh
+        run: |
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty `
+            -Path $key `
+            -Name AllowDevelopmentWithoutDevLicense `
+            -PropertyType DWord `
+            -Value 1 `
+            -Force | Out-Null
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: pubspec.yaml
+          channel: stable
+          cache: true
+          pub-cache: ${{ github.event_name == 'push' }}
+      - name: 获取锁定依赖
+        run: flutter pub get --enforce-lockfile
+      - name: 准备 NuGet CLI
+        shell: pwsh
+        run: |
+          ./tools/release/install_nuget.ps1
+      - name: 构建 Windows 便携版
+        shell: pwsh
+        run: |
+          ./tools/release/build_windows.ps1 `
+            -SkipTests `
+            -SkipPubGet `
+            -CI
+      - name: Windows 便携版启动冒烟
+        shell: pwsh
+        run: |
+          $packageDir = Get-ChildItem `
+            -LiteralPath 'outputs' `
+            -Directory `
+            -Filter 'LanCloud_windows_*_x64_portable' |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (!$packageDir) {
+            throw '找不到 Windows 便携版目录'
+          }
+          ./tools/release/smoke_windows.ps1 `
+            -Executable (Join-Path $packageDir.FullName 'lancloud.exe') `
+            -TimeoutSeconds 15
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-portable
+          path: outputs/LanCloud_windows_*_x64_portable.zip
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0

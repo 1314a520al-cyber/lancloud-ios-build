@@ -1,0 +1,235 @@
+name: Release
+
+# 只有修改 pubspec.yaml 的 main push 才检查版本，避免文档和普通代码提交
+# 也启动发布 workflow；tag / Release 已存在时仍会跳过构建。
+# 也可以在 Actions 页面手动触发，默认仍然创建 draft。
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pubspec.yaml"
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: 创建 draft Release（默认是）
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+env:
+  EXPECTED_CERT_SHA256: 70BD4AA85322FE26E67202FAC31729BDE1F854FA1BD2FD52C88FFCAA02EDB5BB
+  # pubspec.lock 使用官方源生成；CI 必须使用同一来源，否则 pub 会把
+  # lock 中的每个包视为不同来源并拒绝按 lock 解析。
+  PUB_HOSTED_URL: https://pub.dev
+
+jobs:
+  validate:
+    name: 校验
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      should_release: ${{ steps.validate.outputs.should_release }}
+      version: ${{ steps.validate.outputs.version }}
+      tag: ${{ steps.validate.outputs.tag }}
+      commit: ${{ steps.validate.outputs.commit }}
+      is_prerelease: ${{ steps.validate.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: pubspec.yaml
+          channel: stable
+          cache: true
+          pub-cache: ${{ github.event_name == 'push' }}
+      - name: 获取依赖
+        run: flutter pub get --enforce-lockfile
+      - name: 发布前校验
+        id: validate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./tools/release/validate.ps1 `
+            -CI `
+            -SkipPubGet `
+            -ExpectedCertSha256 $env:EXPECTED_CERT_SHA256
+
+  android:
+    name: Android 构建
+    needs: validate
+    if: needs.validate.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: 安装 Android SDK 组件
+        uses: android-actions/setup-android@v4
+      - name: 接受 Android SDK 许可
+        run: yes | sdkmanager --licenses > /dev/null
+      - name: 安装 Android SDK 组件
+        run: |
+          sdkmanager \
+            "platforms;android-37.0" \
+            "build-tools;36.0.0" \
+            "ndk;28.2.13676358" \
+            "cmake;3.22.1"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: pubspec.yaml
+          channel: stable
+          cache: true
+          pub-cache: ${{ github.event_name == 'push' }}
+      - uses: gradle/actions/setup-gradle@v6
+      - name: 获取依赖
+        run: flutter pub get --enforce-lockfile
+      - name: 配置 release 签名
+        shell: pwsh
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          $missing = @(
+            foreach ($name in @(
+              'KEYSTORE_BASE64', 'KEYSTORE_PASSWORD', 'KEY_ALIAS', 'KEY_PASSWORD'
+            )) {
+              if ([string]::IsNullOrEmpty(
+                [Environment]::GetEnvironmentVariable($name)
+              )) {
+                $name
+              }
+            }
+          )
+          if ($missing.Count -gt 0) {
+            throw "缺少 GitHub secret：$($missing -join ', ')。请按 docs/CI_RELEASE.md 配置。"
+          }
+          $keystore = [Convert]::FromBase64String($env:KEYSTORE_BASE64)
+          [IO.File]::WriteAllBytes(
+            (Join-Path $env:GITHUB_WORKSPACE 'android/app/ci-release.jks'),
+            $keystore
+          )
+          [IO.File]::WriteAllLines(
+            (Join-Path $env:GITHUB_WORKSPACE 'android/key.properties'),
+            @(
+              "storePassword=$env:KEYSTORE_PASSWORD",
+              "keyPassword=$env:KEY_PASSWORD",
+              "keyAlias=$env:KEY_ALIAS",
+              'storeFile=ci-release.jks'
+            )
+          )
+      - name: 构建并校验签名
+        shell: pwsh
+        run: |
+          ./tools/release/build_android.ps1 `
+            -SkipTests `
+            -SkipPubGet `
+            -ExpectedCertSha256 $env:EXPECTED_CERT_SHA256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-apks
+          path: outputs/LanCloud_android_*.apk
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  windows:
+    name: Windows 构建
+    needs: validate
+    if: needs.validate.outputs.should_release == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: 启用开发者模式（符号链接）
+        shell: pwsh
+        run: |
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty `
+            -Path $key `
+            -Name AllowDevelopmentWithoutDevLicense `
+            -PropertyType DWord `
+            -Value 1 `
+            -Force | Out-Null
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: pubspec.yaml
+          channel: stable
+          cache: true
+          pub-cache: ${{ github.event_name == 'push' }}
+      - name: 获取依赖
+        run: flutter pub get --enforce-lockfile
+      - name: 准备 NuGet CLI
+        shell: pwsh
+        run: |
+          ./tools/release/install_nuget.ps1
+      - name: 构建 Windows 便携版
+        shell: pwsh
+        run: |
+          ./tools/release/build_windows.ps1 `
+            -SkipTests `
+            -SkipPubGet `
+            -CI
+      - name: Windows 便携版启动冒烟
+        shell: pwsh
+        run: |
+          $packageDir = Get-ChildItem `
+            -LiteralPath 'outputs' `
+            -Directory `
+            -Filter 'LanCloud_windows_*_x64_portable' |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (!$packageDir) {
+            throw '找不到 Windows 便携版目录'
+          }
+          ./tools/release/smoke_windows.ps1 `
+            -Executable (Join-Path $packageDir.FullName 'lancloud.exe') `
+            -TimeoutSeconds 15
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-portable
+          path: outputs/LanCloud_windows_*_x64_portable.zip
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  release:
+    name: 创建 Release
+    needs: [validate, android, windows]
+    if: needs.validate.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: android-apks
+          path: outputs
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-portable
+          path: outputs
+      - name: 创建/补齐 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DRAFT: ${{ github.event_name == 'push' || inputs.draft }}
+        run: |
+          $draft = [System.Convert]::ToBoolean($env:RELEASE_DRAFT)
+          ./tools/release/publish.ps1 -Draft:$draft

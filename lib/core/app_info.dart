@@ -54,10 +54,10 @@ String abiLabel(Abi abi) {
 }
 
 /// 开源协议与项目地址。
-const String projectUrl = 'https://github.com/Tgaisen/LanCloud';
+const String projectUrl = 'https://github.com/1314a520al-cyber/LanCloud-iOS';
 
 /// 「我的仓库」地址（用户的个人仓库 / 更新来源）。
-const String myRepoUrl = 'https://github.com/1314a520al-cyber/LanCloud';
+const String myRepoUrl = 'https://github.com/1314a520al-cyber/LanCloud-iOS';
 
 /// 构建信息：发布脚本（tools/release/build_*.ps1）用 --dart-define 注入；
 /// [gitCommit] 是完整 hash（40 位），本地直接运行 / 普通构建时为空，

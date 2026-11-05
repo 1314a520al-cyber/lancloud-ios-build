@@ -631,14 +631,22 @@ class _ProfilePageState extends riverpod.ConsumerState<ProfilePage>
   List<Widget> _singlePaneChildren(BuildContext context) {
     final l10n = context.l10n;
     return [
-      // 组 1：账号（分组小标题 + 信息卡 + 网页版 / 个人中心 / 回收站）
+      // 组 1：账号（分组小标题 + 信息卡 + 回收站）
       M3eSectionHeader(l10n.accountTitle),
       SegmentedList(
         children: [
           ProfileAccountTile(
             onSwitchAccount: () => _showAccountSwitcher(context),
           ),
-          ..._webLinkTiles(context),
+          // 只保留回收站，其他网页版/个人中心隐藏
+          ListTile(
+            leading: const Icon(Icons.delete_outline),
+            title: const Text('回收站'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const RecycleBinPage()),
+            ),
+          ),
         ],
       ),
       // 组 2：设置（分组小标题 + 5 个大类）

@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
+import '../core/account_state.dart';
 import '../core/api/lanzou_client.dart';
 import '../l10n/l10n.dart';
 import 'common.dart';
@@ -29,8 +30,18 @@ class _RecycleBinPageState extends riverpod.ConsumerState<RecycleBinPage> {
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      // 从 account_state 获取 cookie
-      // TODO: 接入真实 account_state
+      // 从 account_state 获取当前账号的 cookie
+      final accountState = ref.read(accountStateProvider);
+      final account = accountState.store.active;
+      if (account == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('请先登录蓝奏云账号')),
+          );
+        }
+        return;
+      }
+      _cookie = account.cookie;
       final dio = Dio();
       final resp = await dio.get(
         'https://pc.woozooo.com/mydisk.php?item=recycle&action=files',

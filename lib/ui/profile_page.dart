@@ -658,8 +658,7 @@ class _ProfilePageState extends riverpod.ConsumerState<ProfilePage>
             ),
         ],
       ),
-      // 组 3：应用（分组小标题 + 更新 / 关于）
-      M3eSectionHeader(l10n.appSection),
+      // 组 3：更新 / 关于
       SegmentedList(
         children: [
           // 自动检测到新版本时在副标题引导用户进入更新页

@@ -2,6 +2,44 @@
 
 LanCloud 蓝奏云第三方客户端 iOS 版。
 
+## 项目介绍
+
+这是一个蓝奏云第三方 Flutter 客户端，支持 iOS 平台。
+
+### 功能
+- **MD 3 设计**：表现力设计、动态取色、自适应布局、悬浮底栏
+- **网盘管理**：上传、下载、分享、新建文件夹、修改信息、移动、删除、搜索、排序
+- **分享链接**：支持打开蓝奏云分享链接
+- **多账号**：多账号支持
+- **回收站**：蓝奏云回收站原生页面（列表、恢复、彻底删除、清空）
+- **文叔叔**：文叔叔（wenshushu.cn）原生功能（登录、上传、取件下载）
+
+### 技术栈
+- Flutter 3.47+
+- Dart
+- material_ui（MD3 设计）
+- dio（网络请求）
+- shared_preferences（本地存储）
+- flutter_secure_storage（安全存储）
+- file_picker（文件选择）
+- receive_sharing_intent（接收分享）
+
+### 接口来源
+- **蓝奏云**：https://pc.woozooo.com
+- **文叔叔**：https://ap.wenshushu.cn
+
+### 插件来源
+- Flutter：https://flutter.dev
+- material_ui：https://pub.dev/packages/material_ui
+- dio：https://pub.dev/packages/dio
+- shared_preferences：https://pub.dev/packages/shared_preferences
+- file_picker：https://pub.dev/packages/file_picker
+- receive_sharing_intent：https://pub.dev/packages/receive_sharing_intent
+
+### 参与的仓库
+- 原项目：LanCloud（已设为私密）
+- 构建仓库：LanCloud-iOS（本仓库）
+
 ## 下载
 
 最新版本：[v1.0.1](https://github.com/1314a520al-cyber/LanCloud-iOS/releases/tag/v1.0.1)

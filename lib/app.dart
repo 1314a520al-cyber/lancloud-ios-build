@@ -650,6 +650,12 @@ class _RootShellState extends ConsumerState<RootShell>
     _ => l10n.tabProfile,
   };
 
+  /// 左边长底栏的视图（除了"我的"）
+  List<int> get _leftIds => _ids.where((id) => id != _viewProfile).toList();
+
+  /// 右边短底栏的视图（只有"我的"）
+  List<int> get _rightIds => _ids.where((id) => id == _viewProfile).toList();
+
   /// 打开某个视图：在底栏显示时切换到对应页，否则作为新页面打开。
   void _goTo(int viewId) {
     final i = _ids.indexOf(viewId);

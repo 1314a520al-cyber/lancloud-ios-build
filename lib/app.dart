@@ -637,7 +637,7 @@ class _RootShellState extends ConsumerState<RootShell>
     _viewDrive => selected ? Icons.folder : Icons.folder_outlined,
     _viewTransfers => selected ? Icons.swap_vert : Icons.swap_vert_outlined,
     _viewFavorites => selected ? Icons.star_outline : Icons.star_border,
-    _viewWenshu => selected ? Icons.upload : Icons.upload,
+    _viewWenshu => selected ? Icons.send : Icons.send_outlined,
     _ => selected ? Icons.person : Icons.person_outline,
   };
 

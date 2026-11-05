@@ -649,9 +649,10 @@ class _ProfilePageState extends riverpod.ConsumerState<ProfilePage>
           ),
         ],
       ),
-      // 组 2：设置（分组小标题 + 5 个大类）
-      M3eSectionHeader(l10n.settings),
-      SegmentedList(
+      // 组 2：设置（可折叠）
+      ExpansionTile(
+        title: Text(l10n.settings, style: context.m3eEmphasizedTheme.titleMedium),
+        leading: const Icon(Icons.settings),
         children: [
           for (final category in SettingsCategory.values)
             ListTile(

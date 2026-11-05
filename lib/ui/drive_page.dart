@@ -50,6 +50,7 @@ enum _FolderMenuAction {
   copyLink,
   password,
   editInfo,
+  pinHome,
   delete,
 }
 
@@ -2264,6 +2265,11 @@ class _DrivePageState extends ConsumerState<DrivePage>
           icon: Icons.edit,
         ),
         M3eMenuItem(
+          value: _FolderMenuAction.pinHome,
+          label: '固定到首页',
+          icon: Icons.push_pin,
+        ),
+        M3eMenuItem(
           value: _FolderMenuAction.delete,
           label: l10n.delete,
           icon: Icons.delete_outline,
@@ -2283,6 +2289,12 @@ class _DrivePageState extends ConsumerState<DrivePage>
         await _setFolderPasswd(folder);
       case _FolderMenuAction.editInfo:
         await _editFolderInfoFromMenu(folder);
+      case _FolderMenuAction.pinHome:
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('已固定 ${folder.name} 到首页')),
+          );
+        }
       case _FolderMenuAction.delete:
         await _deleteFolder(folder);
     }

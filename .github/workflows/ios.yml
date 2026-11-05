@@ -22,7 +22,7 @@ jobs:
       - name: Package IPA
         if: always()
         run: |
-          ls -lh build/ios/iphoneos/
+          ls -lh build/ios/iphonesimulator/
           mkdir -p Payload
           cp -r build/ios/iphonesimulator/Runner.app Payload/
           zip -qry LanCloud-unsigned.ipa Payload

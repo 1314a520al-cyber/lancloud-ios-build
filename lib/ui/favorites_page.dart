@@ -1,0 +1,955 @@
+import 'package:material_ui/material_ui.dart' hide Icons;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../core/account_state.dart';
+import '../core/api/lanzou_client.dart';
+import '../core/api/lanzou_client_registry.dart';
+import '../core/api/models.dart';
+import '../core/data/app_db_provider.dart';
+import '../core/drive_state.dart';
+import '../core/navigation_appearance_settings_state.dart';
+import '../core/navigation_state.dart';
+import 'download_mark.dart';
+import '../core/data/app_db.dart';
+import '../l10n/l10n.dart';
+import 'app_icons.dart';
+import 'common.dart';
+import 'm3e.dart';
+import 'scroll_tint.dart';
+import 'share_file_sheet.dart';
+import 'share_folder_page.dart';
+import 'share_page.dart';
+import 'share_password_dialog.dart';
+
+/// 收藏条目 ⋯ 菜单里的动作。
+enum _FavoriteItemAction { open, copyLink, edit, unfavorite }
+
+/// 收藏视图：独立底栏页，布局与传输页一致（分组 + 多选删除）。
+class FavoritesPage extends ConsumerStatefulWidget {
+  const FavoritesPage({super.key, this.tabIndex});
+
+  /// 外壳中的 page 视图下标；作为独立路由打开时为 null（不响应切换通知）。
+  final int? tabIndex;
+
+  @override
+  ConsumerState<FavoritesPage> createState() => _FavoritesPageState();
+}
+
+class _FavoritesPageState extends ConsumerState<FavoritesPage>
+    with AutomaticKeepAliveClientMixin, SingleTickerProviderStateMixin {
+  static const _anim = Duration(milliseconds: 200);
+
+  List<FavoriteItem> _folders = [];
+  List<FavoriteItem> _files = [];
+  bool _loading = true;
+  bool _selecting = false;
+  final Set<int> _selected = {};
+
+  /// 正在播放删除动画的条目（动画播完再真正删库）
+  final Set<int> _removing = {};
+
+  /// 修改后的高亮闪烁计数（值变化触发一次）
+  final Map<int, int> _pulse = {};
+  final ScrollController _scroll = ScrollController();
+
+  /// 顶栏搜索：与网盘页一致，在当前收藏里按名称过滤。
+  final TextEditingController _search = TextEditingController();
+  bool _searching = false;
+  String _filter = '';
+
+  /// 排序方式：time（收藏时间新到旧，默认）/ name / size。
+  String _sort = 'time';
+
+  late final AppDb _db;
+  late final NavigationState _navigation;
+  late final DriveState _drive;
+
+  /// 拖拽判定用的探针：当前是否"可见地"处于收藏页（底栏 tab 或独立路由）。
+  late final bool Function() _dropProbe = _visibleAsDropTarget;
+
+  bool _visibleAsDropTarget() {
+    if (!mounted) return false;
+    final route = ModalRoute.of(context);
+    // 被别的页面（例如从收藏打开的子目录）盖住时不算
+    if (route != null && !route.isCurrent) return false;
+    // 底栏形态：只有当前激活的 tab 才算；独立页面：在最上层就算
+    if (route == null || route.isFirst) {
+      return widget.tabIndex != null &&
+          _navigation.activeTab.value == widget.tabIndex;
+    }
+    return true;
+  }
+
+  /// 长列表的入场动画：首次载入后播一次，之后滑进来的条目直接显示。
+  late final AnimationController _enter = AnimationController(
+    vsync: this,
+    duration: ListEnterAnimation.duration,
+  );
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _db = ref.read(appDbProvider);
+    _navigation = ref.read(navigationStateProvider);
+    _drive = ref.read(driveStateProvider);
+    _db.revision.addListener(_load);
+    _navigation.activeTab.addListener(_onActiveTabChanged);
+    _drive.addFavoritesProbe(_dropProbe);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _db.revision.removeListener(_load);
+    _drive.removeFavoritesProbe(_dropProbe);
+    _navigation.activeTab.removeListener(_onActiveTabChanged);
+    if (_selecting) {
+      _navigation.setSelectionMode(false);
+      _navigation.onRequestExitSelection = null;
+    }
+    _scroll.dispose();
+    _search.dispose();
+    _enter.dispose();
+    super.dispose();
+  }
+
+  /// 切到本视图时重新读取收藏（可能在别处新增/删除了收藏）。
+  void _onActiveTabChanged() {
+    if (widget.tabIndex == null) return;
+    if (_navigation.activeTab.value == widget.tabIndex) _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final all = await _db.favorites();
+      if (!mounted) return;
+      setState(() {
+        _folders = all.where((f) => f.kind == 'shareFolder').toList();
+        _files = all.where((f) => f.kind == 'shareFile').toList();
+        _loading = false;
+        // 数据已刷新：清掉删除动画标记（清早了会让还没消失的条目反向展开）
+        _removing.clear();
+      });
+      if (!_enter.isAnimating && _enter.value == 0) _enter.forward();
+    } catch (_) {
+      // 读取失败时保持已有内容
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  /// 当前可见（过滤 + 排序后）的收藏：全选 / 反选只作用于可见项。
+  List<FavoriteItem> get _items => [..._visible(_folders), ..._visible(_files)];
+
+  // -------------------------------------------------------------- 搜索 / 排序
+
+  void _exitSearch() {
+    setState(() {
+      _searching = false;
+      _filter = '';
+      _search.clear();
+    });
+  }
+
+  /// 过滤 + 排序：默认按收藏时间新到旧（数据库本身就是这个顺序）。
+  List<FavoriteItem> _visible(List<FavoriteItem> source) {
+    final query = _filter.trim().toLowerCase();
+    final items = query.isEmpty
+        ? List<FavoriteItem>.of(source)
+        : source
+              .where(
+                (item) =>
+                    item.name.toLowerCase().contains(query) ||
+                    item.title.toLowerCase().contains(query),
+              )
+              .toList();
+    switch (_sort) {
+      case 'name':
+        items.sort(
+          (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+        );
+      case 'size':
+        items.sort(
+          (a, b) => lzSizeToBytes(b.size).compareTo(lzSizeToBytes(a.size)),
+        );
+      default:
+        items.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    }
+    return items;
+  }
+
+  /// 顶栏 ⋯ 菜单：排序（时间 / 名称 / 大小）、多选、添加收藏。
+  Future<void> _showMenu() async {
+    final l10n = context.l10n;
+    var sort = _sort;
+    await showAppSheet<void>(
+      context,
+      child: StatefulBuilder(
+        builder: (sheetContext, setSheetState) => Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 分组小标题 + 按钮组：标题用统一的 M3eSectionHeader
+            M3eSectionHeader(l10n.sort, horizontalInset: 24),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: SizedBox(
+                width: double.infinity,
+                child: M3eConnectedButtonGroup<String>(
+                  values: const ['time', 'name', 'size'],
+                  selected: sort,
+                  onSelected: (value) {
+                    setSheetState(() => sort = value);
+                    setState(() => _sort = value);
+                  },
+                  labelOf: (value) => Text(switch (value) {
+                    'name' => l10n.sortName,
+                    'size' => l10n.sortSize,
+                    _ => l10n.sortTime,
+                  }),
+                ),
+              ),
+            ),
+            SheetListGroup(
+              // 与上面的按钮组分开：上边距用列表的左右边距同值（16dp）；
+              // 作为弹窗内容最后一块，下边距同样与左右同值（16dp）
+              margin: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.checklist),
+                  title: Text(l10n.multiSelect),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    _enterSelection();
+                  },
+                ),
+                ListTile(
+                  // 与条目菜单里的「取消收藏」对应（那边用 star-off 自定义图标）
+                  leading: const Icon(Icons.playlist_add),
+                  title: Text(l10n.newFavorite),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    // 打开「打开链接」弹窗，识别出文件（夹）后直接加入收藏
+                    openShareSheet(context, addFavoriteOnResolve: true);
+                  },
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------------ 多选
+
+  void _enterSelection({int? id}) {
+    final wasSelecting = _selecting;
+    if (!_selecting) {
+      // 其它页面可能正处于多选：先退出，避免两处状态打架
+      _navigation.onRequestExitSelection?.call();
+    }
+    setState(() {
+      _selecting = true;
+      if (id != null) _selected.add(id);
+    });
+    _navigation.onRequestExitSelection = _exitSelection;
+    _navigation.setSelectionMode(true);
+    if (!wasSelecting) announceEnteredMultiSelect(context);
+  }
+
+  void _exitSelection() {
+    if (!_selecting) return;
+    setState(() {
+      _selecting = false;
+      _selected.clear();
+    });
+    _navigation.onRequestExitSelection = null;
+    _navigation.setSelectionMode(false);
+  }
+
+  void _toggleSelected(int id) {
+    setState(() {
+      if (!_selected.remove(id)) _selected.add(id);
+    });
+    // 选中数归零 → 自动退出多选
+    if (_selected.isEmpty) _exitSelection();
+  }
+
+  /// 点顶栏空白处回到列表顶部（与网盘页一致）。
+  void _scrollToTop() {
+    if (!_scroll.hasClients) return;
+    _scroll.animateTo(
+      0,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
+  }
+
+  void _selectAll() {
+    setState(() {
+      _selected
+        ..clear()
+        ..addAll(_items.map((item) => item.id));
+    });
+    if (_selected.isEmpty) _exitSelection();
+  }
+
+  void _invertSelection() {
+    setState(() {
+      for (final item in _items) {
+        if (!_selected.remove(item.id)) _selected.add(item.id);
+      }
+    });
+    if (_selected.isEmpty) _exitSelection();
+  }
+
+  /// 批量复制分享链接：每行「名称 链接」，有提取码的一起复制
+  /// （与分享文件夹浏览页的多选「复制链接」同一口径；多条一起复制时，
+  /// 名称能把链接对上号）。
+  Future<void> _copySelectedLinks() async {
+    final items = _items.where((item) => _selected.contains(item.id)).toList();
+    if (items.isEmpty) return;
+    final l10n = context.l10n;
+    final lines = [
+      for (final item in items)
+        item.pwd.isEmpty
+            ? '${item.displayName} ${item.ref}'
+            : l10n.linkWithPassword(
+                '${item.displayName} ${item.ref}',
+                item.pwd,
+              ),
+    ];
+    _exitSelection();
+    await copyText(context, lines.join('\n'));
+  }
+
+  Future<void> _deleteSelected() async {
+    if (_selected.isEmpty) return;
+    final l10n = context.l10n;
+    final count = _selected.length;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(l10n.favoriteDeleteConfirmTitle),
+        content: Text(l10n.favoriteDeleteConfirmMessage(count)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(l10n.cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(l10n.delete),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final ids = _selected.toList();
+    _exitSelection();
+    // 批量删除不逐条播动画：一次落库、一次 revision，列表整体刷新一遍
+    await _db.removeFavoritesByIds(ids);
+  }
+
+  // ------------------------------------------------------------------ 条目
+
+  /// 条目的副标题：列表已经按「文件夹 / 文件」分组，这里不再重复类型；
+  /// 文件保留体积信息。
+  String _subtitle(FavoriteItem item) {
+    if (item.kind == 'shareFolder' || item.size.isEmpty) return '';
+    return prettyLzSize(item.size);
+  }
+
+  Future<void> _open(FavoriteItem item) async {
+    if (_selecting) {
+      _toggleSelected(item.id);
+      return;
+    }
+    if (item.kind == 'shareFile') {
+      await showAppSheet<void>(
+        context,
+        child: ShareFileInfoSheet(
+          name: item.name,
+          url: item.ref,
+          pwd: item.pwd,
+          size: item.size,
+          sharer: item.sharer,
+          // 解析出的最新名称 / 分享者同步写回收藏
+          onResolved: (file) => _db.updateFavorite(
+            item.id,
+            name: file.name.isEmpty ? null : file.name,
+            sharer: file.sharer.isEmpty ? null : file.sharer,
+            // 有些入口收藏时没带 size：解析出来就补上
+            size: file.size.isEmpty ? null : file.size,
+          ),
+          // 提取码不对时补一次密码；验证通过后把新密码写回收藏
+          onPasswordUpdated: (pwd) => _db.updateFavorite(item.id, pwd: pwd),
+        ),
+      );
+    } else {
+      await _openFolder(item);
+    }
+  }
+
+  /// 打开收藏的分享文件夹：先用收藏里的提取码解析；提取码失效时弹
+  /// 「此文件夹需要密码」，验证通过后把新密码写回收藏，再进入浏览页。
+  Future<void> _openFolder(FavoriteItem item) async {
+    final client = ref.read(lanzouClientRegistryProvider).publicClient;
+    final accounts = ref.read(accountStateProvider).store;
+    final l10n = context.l10n;
+    showLoadingDialog(context, l10n.resolving);
+    FolderShareDetail? detail;
+    var pwd = item.pwd;
+    try {
+      detail = await client.resolveFolderShare(item.ref, pwd: pwd);
+    } on NeedPasswordException {
+      detail = null;
+    } on WrongPasswordException {
+      detail = null;
+    } on LanzouException catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(l10n.lanzouError(e))));
+      return;
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(l10n.resolveFailed('$e'))));
+      return;
+    }
+    if (!mounted) return;
+    Navigator.of(context).pop();
+    if (detail == null) {
+      final result = await showFolderPasswordDialog(context, url: item.ref);
+      if (result == null || !mounted) return;
+      detail = result.value;
+      pwd = result.pwd;
+      // 上传者改过提取码：同步写回收藏，下次直接用新的
+      await _db.updateFavorite(item.id, pwd: pwd);
+      if (!mounted) return;
+    }
+    // 与「打开链接」打开文件夹一致：进入浏览页前记一条最近使用
+    await _db.addRecent(
+      account: accounts.activeUid ?? '',
+      kind: 'shareFolder',
+      name: detail.name,
+      ref: item.ref,
+      pwd: pwd,
+    );
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            ShareFolderPage(folder: detail!, link: item.ref, pwd: pwd),
+      ),
+    );
+  }
+
+  /// 条目 ⋯ 菜单（MD3E 弹出菜单）：打开 / 复制链接 / 修改信息 / 取消收藏。
+  ///
+  /// [anchorContext] 是那颗 ⋯ 按钮（桌面端右键时是整行）的 context——
+  /// 菜单贴它下方右对齐弹出。
+  Future<void> _itemOptions(
+    FavoriteItem item,
+    BuildContext anchorContext, {
+    Offset? pointerPosition,
+  }) async {
+    final anchor = m3eMenuAnchorOf(anchorContext);
+    if (anchor == null) return;
+    final _FavoriteItemAction? action = await showM3eMenu<_FavoriteItemAction>(
+      context: context,
+      anchor: anchor,
+      pointerPosition: pointerPosition,
+      // ⋯ 贴着右边缘：菜单右缘对齐，免得被屏幕右上角夹歪
+      alignEnd: true,
+      items: [
+        M3eMenuItem(
+          value: _FavoriteItemAction.open,
+          label: context.l10n.open,
+          icon: Icons.open_in_new,
+        ),
+        M3eMenuItem(
+          value: _FavoriteItemAction.copyLink,
+          label: context.l10n.copyLink,
+          icon: Icons.copy,
+        ),
+        M3eMenuItem(
+          value: _FavoriteItemAction.edit,
+          label: context.l10n.editInfo,
+          icon: Icons.edit,
+        ),
+        M3eMenuItem(
+          value: _FavoriteItemAction.unfavorite,
+          label: context.l10n.unfavorite,
+          // 与首页 / 分享浏览菜单一致：星形划斜杠（Remix star-off-line）
+          icon: Icons.star_off_line,
+        ),
+      ],
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case _FavoriteItemAction.open:
+        await _open(item);
+      case _FavoriteItemAction.copyLink:
+        await copyText(
+          context,
+          item.pwd.isEmpty
+              ? item.ref
+              : context.l10n.linkWithPassword(item.ref, item.pwd),
+        );
+      case _FavoriteItemAction.edit:
+        await _editFavorite(item);
+      case _FavoriteItemAction.unfavorite:
+        setState(() => _removing.add(item.id));
+        await Future<void>.delayed(const Duration(milliseconds: 220));
+        if (!mounted) return;
+        await _db.removeFavoriteById(item.id);
+    }
+  }
+
+  Future<void> _editFavorite(FavoriteItem item) async {
+    final l10n = context.l10n;
+    final titleController = TextEditingController(text: item.title);
+    final linkController = TextEditingController(text: item.ref);
+    final pwdController = TextEditingController(text: item.pwd);
+    String? linkError;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => formDialog(
+          dialogContext,
+          title: Text(l10n.editInfo),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: titleController,
+                decoration: InputDecoration(
+                  labelText: l10n.favoriteTitle,
+                  hintText: l10n.favoriteTitleHint,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: linkController,
+                onChanged: (_) {
+                  if (linkError != null) {
+                    setDialogState(() => linkError = null);
+                  }
+                },
+                decoration: errorState(
+                  context,
+                  InputDecoration(labelText: l10n.shareLink),
+                  linkError,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: pwdController,
+                decoration: InputDecoration(labelText: l10n.passwordOptional),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: Text(l10n.cancel),
+            ),
+            FilledButton(
+              onPressed: () {
+                final link = linkController.text.trim();
+                if (link.isEmpty) {
+                  setDialogState(() => linkError = l10n.pleasePasteShareLink);
+                  return;
+                }
+                Navigator.of(dialogContext).pop();
+                _db.updateFavorite(
+                  item.id,
+                  title: titleController.text.trim(),
+                  ref: link,
+                  pwd: pwdController.text.trim(),
+                );
+                // 修改后闪一下，和网盘列表一致
+                setState(() => _pulse[item.id] = (_pulse[item.id] ?? 0) + 1);
+              },
+              child: Text(l10n.save),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _tile(FavoriteItem item, {required int index}) {
+    final l10n = context.l10n;
+    final scheme = Theme.of(context).colorScheme;
+    final selected = _selected.contains(item.id);
+    final isFolder = item.kind == 'shareFolder';
+    // 菜单要贴在被点的 ⋯ 下方，所以这里得拿到行 / 按钮各自的 context
+    return Builder(
+      builder: (BuildContext rowContext) => Md3ListItem(
+        key: ValueKey('favorite-${item.id}'),
+        index: index,
+        // 入场动画由外层 ListEnterAnimation 统一驱动（只播一次）
+        animateIn: false,
+        removing: _removing.contains(item.id),
+        pulse: _pulse[item.id] ?? 0,
+        icon: isFolder ? Icons.folder : iconForFile(item.name),
+        // 图标块底色与文件项一致，文件夹只换图标颜色
+        iconColor: isFolder
+            ? scheme.primary
+            : fileIconColor(item.name, brightness: scheme.brightness),
+        title: item.displayName,
+        subtitle: _subtitle(item),
+        titleMaxLines: 2,
+        subtitleMaxLines: 2,
+        selected: selected,
+        onTap: () => _open(item),
+        onLongPress: () => _enterSelection(id: item.id),
+        // 鼠标：点图标块 = 进入多选并选中 / 已选中时取消选中
+        onIconTap: iconTapFor(
+          selected: selected,
+          onTap: () => _open(item),
+          onLongPress: () => _enterSelection(id: item.id),
+        ),
+        // 桌面端右键：与 ⋯ 菜单同一套操作（多选时不响应，和 ⋯ 一起隐藏）
+        onSecondaryTap: _selecting
+            ? null
+            : (Offset position) =>
+                  _itemOptions(item, rowContext, pointerPosition: position),
+        // 已加入下载的分享文件：标题右侧显示一个「已加入下载」小标记
+        badge: isFolder ? null : DownloadMarkIcon(markKey: item.ref, size: 16),
+        // 多选时隐藏 ⋯，但保留占位：条目高度不会跳
+        trailing: HideKeepingSpace(
+          hidden: _selecting,
+          child: Builder(
+            builder: (BuildContext buttonContext) => M3eIconButton(
+              tooltip: l10n.moreActions,
+              icon: Icons.more_vert,
+              onPressed: () => _itemOptions(item, buttonContext),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final appearance = ref.watch(navigationAppearanceSettingsStateProvider);
+    return ListenableBuilder(
+      listenable: appearance.revision,
+      builder: (context, _) =>
+          _buildPage(context, appearance.hideTopBar, _navigation),
+    );
+  }
+
+  Widget _buildPage(
+    BuildContext context,
+    bool hideTopBar,
+    NavigationState navigation,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
+    final headerHeight = MediaQuery.paddingOf(context).top + kToolbarHeight;
+    final selectedCount = _selected.length;
+    final folders = _visible(_folders);
+    final files = _visible(_files);
+    return PopScope(
+      // 独立页面（_openView 打开的二级路由）没有外壳的返回处理：
+      // 多选 / 搜索状态下返回先退出，再退出页面；
+      // 位于底栏（首个路由）时交给外壳统一处理。
+      // 注意不能用 tabIndex 判断：独立打开时它也带着同一个值。
+      canPop: inRootShell(context) || (!_selecting && !_searching),
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        if (_selecting) {
+          _exitSelection();
+        } else if (_searching) {
+          _exitSearch();
+        }
+      },
+      child: Scaffold(
+        // 大屏外壳里的页面：背景交给外壳的圆角卡片
+        backgroundColor: transparentPageBackground(context)
+            ? Colors.transparent
+            : null,
+        body: Stack(
+          children: [
+            // 小屏：正文区整体让开左右挖孔 / 侧边导航栏；顶栏（浮层）保持原样
+            BodySideInset(
+              child: ScrollTint(
+                hideDistance: headerHeight,
+                readBarsHidden: () => navigation.topBarHide.value,
+                onBarsHidden: hideTopBar
+                    ? navigation.setTopBarHideFromScroll
+                    : null,
+                // 列表快速滑动条（可拖拽）
+                child: FastScrollbar(
+                  controller: _scroll,
+                  // 顶栏是浮层：滑块从顶栏下方开始，底部让开底栏
+                  padding: EdgeInsets.only(
+                    top: headerHeight,
+                    bottom: shellBottomBarInset(context),
+                  ),
+                  child: CustomScrollView(
+                    controller: _scroll,
+                    slivers: [
+                      // 顶栏不占布局，这里留出等高占位
+                      SliverToBoxAdapter(child: SizedBox(height: headerHeight)),
+                      if (_loading)
+                        SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: Padding(
+                            // 底栏盖在正文上方时，空状态保持在可见区域居中
+                            padding: EdgeInsets.only(
+                              bottom: shellBottomBarInset(context),
+                            ),
+                            child: const Center(child: M3eLoadingIndicator()),
+                          ),
+                        )
+                      else if (folders.isEmpty && files.isEmpty)
+                        SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: Padding(
+                            padding: EdgeInsets.only(
+                              bottom: shellBottomBarInset(context),
+                            ),
+                            child: EmptyHint(
+                              icon: Icons.star_border,
+                              text: _filter.trim().isEmpty
+                                  ? l10n.favoritesHint
+                                  : l10n.filterResult,
+                            ),
+                          ),
+                        )
+                      else
+                        SliverPadding(
+                          // 底部留白与首页 / 网盘 / 传输保持一致
+                          padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+                          sliver: SliverMainAxisGroup(
+                            slivers: [
+                              if (folders.isNotEmpty) ...[
+                                SliverToBoxAdapter(
+                                  child: SectionHeader(
+                                    title: l10n.favoriteFolders,
+                                    count: folders.length,
+                                  ),
+                                ),
+                                // 懒加载：收藏多了也只构建可见部分
+                                SegmentedSliverList(
+                                  adaptive: true,
+                                  // 幸存条目按 key 复用元素，删除后不重建
+                                  findChildIndexCallback: childIndexLookup(
+                                    folders,
+                                    (item) =>
+                                        ValueKey('favorite-entry-${item.id}'),
+                                  ),
+                                  itemCount: folders.length,
+                                  itemBuilder: (context, index) =>
+                                      ListEnterAnimation(
+                                        key: ValueKey(
+                                          'favorite-entry-${folders[index].id}',
+                                        ),
+                                        progress: _enter,
+                                        index: index,
+                                        child: _tile(
+                                          folders[index],
+                                          index: index,
+                                        ),
+                                      ),
+                                ),
+                                const SliverToBoxAdapter(
+                                  child: SizedBox(height: 20),
+                                ),
+                              ],
+                              if (files.isNotEmpty) ...[
+                                SliverToBoxAdapter(
+                                  child: SectionHeader(
+                                    title: l10n.favoriteFiles,
+                                    count: files.length,
+                                  ),
+                                ),
+                                SegmentedSliverList(
+                                  adaptive: true,
+                                  findChildIndexCallback: childIndexLookup(
+                                    files,
+                                    (item) =>
+                                        ValueKey('favorite-entry-${item.id}'),
+                                  ),
+                                  itemCount: files.length,
+                                  itemBuilder: (context, index) =>
+                                      ListEnterAnimation(
+                                        key: ValueKey(
+                                          'favorite-entry-${files[index].id}',
+                                        ),
+                                        progress: _enter,
+                                        index: index,
+                                        child: _tile(
+                                          files[index],
+                                          index: index,
+                                        ),
+                                      ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      // 底栏盖在正文上方（extendBody）时，补足列表末尾留白
+                      // 空列表时不要加：占满高度的空状态 / 加载中占位已经算好
+                      // 可见区域，再加这份留白会让空白提示能往下滑
+                      if (folders.isNotEmpty || files.isNotEmpty)
+                        SliverToBoxAdapter(
+                          child: SizedBox(height: shellBottomBarInset(context)),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            // 顶栏浮层：与底栏共用收起进度，切换视图时会下滑出现
+            Positioned(
+              left: 0,
+              right: 0,
+              top: 0,
+              child: TopBarOverlay(
+                height: headerHeight,
+                background: topBarBackgroundColor(context, scheme),
+                // 点顶栏空白处回到列表顶部（按钮 / 输入框自行响应，不会误触）
+                builder: (context) => GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTap: _scrollToTop,
+                  child: AppBar(
+                    backgroundColor: Colors.transparent,
+                    scrolledUnderElevation: 0,
+                    leading: _searching
+                        ? IconButton(
+                            tooltip: l10n.closeSearch,
+                            icon: const Icon(Icons.close),
+                            onPressed: _exitSearch,
+                          )
+                        : ((ModalRoute.of(context)?.isFirst ?? true)
+                              ? null
+                              : const AppBarBackButton()),
+                    // 标题 ↔ 搜索框带显示 / 隐藏动画（与分享浏览页一致）
+                    title: AppBarSearchSwitcher(
+                      searching: _searching,
+                      title: Text(l10n.myFavorites),
+                      searchField: TextField(
+                        controller: _search,
+                        autofocus: true,
+                        decoration: InputDecoration(
+                          hintText: l10n.searchFavorites,
+                          border: InputBorder.none,
+                        ),
+                        onChanged: (value) => setState(() => _filter = value),
+                      ),
+                    ),
+                    actions: _searching
+                        ? const <Widget>[]
+                        : [
+                            IconButton(
+                              tooltip: l10n.search,
+                              icon: const Icon(Icons.search),
+                              onPressed: () =>
+                                  setState(() => _searching = true),
+                            ),
+                            IconButton(
+                              tooltip: l10n.menu,
+                              icon: const Icon(Icons.more_vert),
+                              onPressed: _showMenu,
+                            ),
+                          ],
+                  ),
+                ),
+              ),
+            ),
+            // 多选顶栏
+            Positioned(
+              left: 0,
+              right: 0,
+              top: 0,
+              child: IgnorePointer(
+                ignoring: !_selecting,
+                child: AnimatedOpacity(
+                  opacity: _selecting ? 1 : 0,
+                  duration: _anim,
+                  curve: Curves.easeInOut,
+                  child: Material(
+                    elevation: 0,
+                    // 与网盘页多选条一致：小屏随滚动渐变，大屏保持侧栏同色
+                    color: topBarBackgroundColor(context, scheme),
+                    child: SizedBox(
+                      height: headerHeight,
+                      child: AppBar(
+                        key: const ValueKey('favorites-selection-appbar'),
+                        // 底色由外层 Material 提供（与网盘页多选条一致），
+                        // 否则 AppBar 会用自己的 surface 把外层颜色盖住
+                        backgroundColor: Colors.transparent,
+                        scrolledUnderElevation: 0,
+                        leading: IconButton(
+                          tooltip: l10n.exitSelection,
+                          icon: const Icon(Icons.close),
+                          onPressed: _exitSelection,
+                        ),
+                        title: Text(l10n.selectedCount(selectedCount)),
+                        actions: [
+                          IconButton(
+                            tooltip: l10n.selectAll,
+                            icon: const Icon(Icons.select_all),
+                            onPressed: _selectAll,
+                          ),
+                          IconButton(
+                            tooltip: l10n.invertSelection,
+                            icon: const Icon(Icons.flip),
+                            onPressed: _invertSelection,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            // 多选操作栏
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: IgnorePointer(
+                ignoring: !_selecting,
+                child: AnimatedOpacity(
+                  opacity: _selecting ? 1 : 0,
+                  duration: _anim,
+                  curve: Curves.easeInOut,
+                  child: BatchActionBar(
+                    children: [
+                      BatchAction(
+                        icon: Icons.copy,
+                        label: l10n.copyLink,
+                        onPressed: selectedCount == 0
+                            ? null
+                            : _copySelectedLinks,
+                      ),
+                      BatchAction(
+                        icon: Icons.delete_outline,
+                        label: l10n.delete,
+                        onPressed: selectedCount == 0 ? null : _deleteSelected,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

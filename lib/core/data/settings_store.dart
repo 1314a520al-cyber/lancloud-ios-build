@@ -1,0 +1,489 @@
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../app_info.dart';
+import '../update/release_info.dart';
+
+class SettingsStore {
+  static const _keyLanguage = 'language';
+  static const _keyDownloadDir = 'download_dir';
+  static const _keyDownloadDirTree = 'download_dir_tree';
+  static const _keyDownloadDirLabel = 'download_dir_label';
+  static const _keyGridView = 'grid_view';
+  static const _keyLaunchPage = 'launch_page';
+  static const _keyHomeFolderOpen = 'home_folder_open';
+  static const _keyCacheFolders = 'cache_folders';
+  static const _keyLoadAllPages = 'load_all_pages';
+  static const _keyThemeMode = 'theme_mode';
+  static const _keyOled = 'oled_black';
+  static const _keyDynamicColor = 'dynamic_color';
+  static const _keyDynamicColorChosen = 'dynamic_color_chosen';
+  static const _keySeed = 'theme_seed';
+  static const _keyInterval = 'request_interval';
+  static const _keyMaxUp = 'max_uploads';
+  static const _keyMaxDown = 'max_downloads';
+  static const _keyDownloadConnections = 'download_connections';
+  static const _keyApiHost = 'api_host';
+  static const _keyUserAgent = 'user_agent';
+  static const _keyUploadPath = 'upload_path';
+  static const _keySwipeTabs = 'swipe_tabs';
+  static const _keyHideBars = 'hide_bars_on_scroll';
+  static const _keyHideBarsMode = 'hide_bars_mode';
+  static const _keyHideTopBar = 'hide_top_bar';
+  static const _keyHideBottomBar = 'hide_bottom_bar';
+  static const _keyFloatingNav = 'floating_nav_bar';
+  static const _keyTransitions = 'transition_animations';
+  static const _keyNotifyProgress = 'notify_progress';
+  static const _keyNotifyDone = 'notify_done';
+  static const _keySortMode = 'sort_mode';
+  static const _keyQuickExpanded = 'quick_access_expanded';
+  static const _keyRecentsExpanded = 'recents_expanded';
+  static const _keyRecentLimit = 'recent_limit';
+  static const _keyClipboardLink = 'clipboard_link_prompt';
+  static const _keyNavTransfers = 'nav_show_transfers';
+  static const _keyNavFavorites = 'nav_show_favorites';
+  static const _keyMotionMode = 'motion_mode';
+  static const _keyUpdateChannel = 'update_channel';
+  static const _keyUpdateAutoCheck = 'update_auto_check';
+
+  String? downloadDir;
+
+  /// Android SAF 授权的下载目录（tree URI）与展示名；为空表示未授权。
+  String? downloadDirTree;
+  String? downloadDirLabel;
+  String language = 'system';
+  bool gridView = true;
+  String launchPage = 'home';
+
+  /// 首页目录打开方式：page = 新页面，drive = 跳转网盘页。
+  String homeFolderOpenMode = 'drive';
+  bool cacheFolders = true;
+  bool loadAllPages = false;
+  String themeMode = 'system';
+  bool oledBlack = false;
+
+  /// 动态取色：跟随系统壁纸（Android 12+）。
+  bool dynamicColor = false;
+
+  /// 用户是否手动设置过动态取色。false 表示还没选过：
+  /// 启动时若设备支持会自动开启（见 AppStartup.initialize）。
+  bool dynamicColorChosen = false;
+  int themeSeed = 0xFF2E6BE6;
+  int requestInterval = 100;
+  int maxUploads = 1;
+  int maxDownloads = 3;
+
+  /// 单个下载任务使用的连接数；1 表示沿用单流下载。
+  int downloadConnections = 2;
+  String apiHost = 'pc';
+  String userAgent = '';
+
+  /// 上传接口路径（HTML5 上传接口名），主机跟随「网盘接口域名」。
+  String uploadPath = 'html5up.php';
+  bool swipeTabs = false;
+  bool hideTopBar = false;
+  bool hideBottomBar = false;
+  bool floatingNavBar = false;
+
+  /// 目录切换与列表出现动画，关闭可减少低端设备掉帧。
+  bool transitionAnimations = true;
+
+  /// 传输进行中在通知栏显示进度。
+  bool notifyProgress = true;
+
+  /// 下载或上传完成时提醒。
+  bool notifyDone = true;
+
+  /// 网盘文件排序方式：default / name / size / time。
+  String sortMode = 'default';
+
+  /// 首页「快速访问」/「最近使用」是否展开（重启后保持）。
+  bool quickExpanded = true;
+  bool recentsExpanded = true;
+
+  /// 最近使用最多保留多少条，0 表示不记录。
+  int recentLimit = 50;
+
+  /// 复制到蓝奏云分享链接时提示打开。
+  /// 默认关闭：只要读取剪贴板，系统就会弹出「已读取剪贴板」提醒，
+  /// 有需要的人在设置-通知里自己打开。
+  bool clipboardLinkPrompt = false;
+
+  /// 「传输」「收藏」是否显示在底栏（默认隐藏，仍可从快捷操作栏打开）。
+  bool navShowTransfers = false;
+  bool navShowFavorites = false;
+
+  /// 全局动画：auto = 跟随无障碍功能自动禁用（默认），on = 始终启用，
+  /// off = 始终禁用。见 ThemeSettingsState.setMotionMode / reduceMotionOf()。
+  String motionMode = 'auto';
+
+  /// 更新通道：stable = 正式版、beta = 测试版。默认与安装版本的类型一致
+  /// （测试版安装包默认跟测试版，正式版默认跟正式版），用户改过就尊重选择。
+  String updateChannel = defaultUpdateChannel;
+
+  /// 启动时自动检查更新（默认开；检测本身的频率由 UpdateService 控制，
+  /// 见「更新信息有效期」）。
+  bool updateAutoCheck = true;
+
+  /// 默认更新通道：按安装的版本名推导（与发布脚本的预发布判定同一口径）。
+  static String get defaultUpdateChannel =>
+      isPrereleaseVersion(appVersion) ? 'beta' : 'stable';
+
+  Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    language = prefs.getString(_keyLanguage) ?? 'system';
+    downloadDir = prefs.getString(_keyDownloadDir);
+    downloadDirTree = prefs.getString(_keyDownloadDirTree);
+    downloadDirLabel = prefs.getString(_keyDownloadDirLabel);
+    gridView = prefs.getBool(_keyGridView) ?? true;
+    launchPage = prefs.getString(_keyLaunchPage) ?? 'home';
+    homeFolderOpenMode = prefs.getString(_keyHomeFolderOpen) ?? 'drive';
+    cacheFolders = prefs.getBool(_keyCacheFolders) ?? true;
+    loadAllPages = prefs.getBool(_keyLoadAllPages) ?? false;
+    themeMode = prefs.getString(_keyThemeMode) ?? 'system';
+    oledBlack = prefs.getBool(_keyOled) ?? false;
+    dynamicColor = prefs.getBool(_keyDynamicColor) ?? false;
+    dynamicColorChosen = prefs.getBool(_keyDynamicColorChosen) ?? false;
+    themeSeed = prefs.getInt(_keySeed) ?? 0xFF2E6BE6;
+    requestInterval = prefs.getInt(_keyInterval) ?? 100;
+    maxUploads = prefs.getInt(_keyMaxUp) ?? 1;
+    maxDownloads = prefs.getInt(_keyMaxDown) ?? 3;
+    downloadConnections = normalizeDownloadConnections(
+      prefs.getInt(_keyDownloadConnections) ?? 2,
+    );
+    apiHost = prefs.getString(_keyApiHost) ?? 'pc';
+    userAgent = prefs.getString(_keyUserAgent) ?? '';
+    uploadPath = prefs.getString(_keyUploadPath) ?? 'html5up.php';
+    swipeTabs = prefs.getBool(_keySwipeTabs) ?? false;
+    final legacyMode = prefs.getString(_keyHideBarsMode);
+    if (legacyMode != null) {
+      hideTopBar = legacyMode == 'top' || legacyMode == 'both';
+      hideBottomBar = legacyMode == 'bottom' || legacyMode == 'both';
+    } else {
+      final legacyBool = prefs.getBool(_keyHideBars) ?? false;
+      hideTopBar = legacyBool;
+      hideBottomBar = legacyBool;
+    }
+    hideTopBar = prefs.getBool(_keyHideTopBar) ?? hideTopBar;
+    hideBottomBar = prefs.getBool(_keyHideBottomBar) ?? hideBottomBar;
+    // 悬浮底栏默认开启（仿 iFile 的悬浮感）；用户仍可在设置里关掉
+    floatingNavBar = prefs.getBool(_keyFloatingNav) ?? true;
+    transitionAnimations = prefs.getBool(_keyTransitions) ?? true;
+    notifyProgress = prefs.getBool(_keyNotifyProgress) ?? true;
+    notifyDone = prefs.getBool(_keyNotifyDone) ?? true;
+    sortMode = prefs.getString(_keySortMode) ?? 'default';
+    quickExpanded = prefs.getBool(_keyQuickExpanded) ?? true;
+    recentsExpanded = prefs.getBool(_keyRecentsExpanded) ?? true;
+    recentLimit = prefs.getInt(_keyRecentLimit) ?? 50;
+    clipboardLinkPrompt = prefs.getBool(_keyClipboardLink) ?? false;
+    navShowTransfers = prefs.getBool(_keyNavTransfers) ?? false;
+    navShowFavorites = prefs.getBool(_keyNavFavorites) ?? false;
+    motionMode = prefs.getString(_keyMotionMode) ?? 'auto';
+    updateChannel = prefs.getString(_keyUpdateChannel) ?? defaultUpdateChannel;
+    updateAutoCheck = prefs.getBool(_keyUpdateAutoCheck) ?? true;
+  }
+
+  Future<void> setNavShowTransfers(bool value) async {
+    navShowTransfers = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyNavTransfers, value);
+  }
+
+  Future<void> setNavShowFavorites(bool value) async {
+    navShowFavorites = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyNavFavorites, value);
+  }
+
+  Future<void> setMotionMode(String value) async {
+    motionMode = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyMotionMode, value);
+  }
+
+  Future<void> setNotifyProgress(bool value) async {
+    notifyProgress = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyNotifyProgress, value);
+  }
+
+  Future<void> setNotifyDone(bool value) async {
+    notifyDone = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyNotifyDone, value);
+  }
+
+  Future<void> setSortMode(String value) async {
+    sortMode = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keySortMode, value);
+  }
+
+  Future<void> setQuickExpanded(bool value) async {
+    quickExpanded = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyQuickExpanded, value);
+  }
+
+  Future<void> setRecentsExpanded(bool value) async {
+    recentsExpanded = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyRecentsExpanded, value);
+  }
+
+  Future<void> setRecentLimit(int value) async {
+    recentLimit = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_keyRecentLimit, value);
+  }
+
+  Future<void> setHideTopBar(bool value) async {
+    hideTopBar = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyHideTopBar, value);
+  }
+
+  Future<void> setHideBottomBar(bool value) async {
+    hideBottomBar = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyHideBottomBar, value);
+  }
+
+  Future<void> setFloatingNavBar(bool value) async {
+    floatingNavBar = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyFloatingNav, value);
+  }
+
+  Future<void> setTransitionAnimations(bool value) async {
+    transitionAnimations = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyTransitions, value);
+  }
+
+  Future<void> setSwipeTabs(bool value) async {
+    swipeTabs = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keySwipeTabs, value);
+  }
+
+  Future<void> setUpdateChannel(String value) async {
+    updateChannel = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyUpdateChannel, value);
+  }
+
+  Future<void> setUpdateAutoCheck(bool value) async {
+    updateAutoCheck = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyUpdateAutoCheck, value);
+  }
+
+  Future<void> setApiHost(String value) async {
+    apiHost = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyApiHost, value);
+  }
+
+  Future<void> setUserAgent(String value) async {
+    userAgent = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyUserAgent, value);
+  }
+
+  Future<void> setUploadPath(String value) async {
+    uploadPath = value.trim().isEmpty ? 'html5up.php' : value.trim();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyUploadPath, uploadPath);
+  }
+
+  Future<void> setRequestInterval(int value) async {
+    requestInterval = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_keyInterval, value);
+  }
+
+  Future<void> setMaxUploads(int value) async {
+    maxUploads = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_keyMaxUp, value);
+  }
+
+  Future<void> setMaxDownloads(int value) async {
+    maxDownloads = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_keyMaxDown, value);
+  }
+
+  Future<void> setDownloadConnections(int value) async {
+    downloadConnections = normalizeDownloadConnections(value);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_keyDownloadConnections, downloadConnections);
+  }
+
+  Future<void> setThemeMode(String mode) async {
+    themeMode = mode;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyThemeMode, mode);
+  }
+
+  Future<void> setOledBlack(bool value) async {
+    oledBlack = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyOled, value);
+  }
+
+  Future<void> setDynamicColor(bool value) async {
+    dynamicColor = value;
+    dynamicColorChosen = true;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyDynamicColor, value);
+    await prefs.setBool(_keyDynamicColorChosen, true);
+  }
+
+  Future<void> setClipboardLinkPrompt(bool value) async {
+    clipboardLinkPrompt = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyClipboardLink, value);
+  }
+
+  Future<void> setThemeSeed(int value) async {
+    themeSeed = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_keySeed, value);
+  }
+
+  Future<void> setLaunchPage(String page) async {
+    launchPage = page;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyLaunchPage, page);
+  }
+
+  Future<void> setHomeFolderOpenMode(String value) async {
+    homeFolderOpenMode = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyHomeFolderOpen, value);
+  }
+
+  Future<void> setCacheFolders(bool value) async {
+    cacheFolders = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyCacheFolders, value);
+  }
+
+  Future<void> setLoadAllPages(bool value) async {
+    loadAllPages = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyLoadAllPages, value);
+  }
+
+  Future<void> setDownloadDir(String? dir) async {
+    downloadDir = (dir == null || dir.isEmpty) ? null : dir;
+    final prefs = await SharedPreferences.getInstance();
+    if (downloadDir == null) {
+      await prefs.remove(_keyDownloadDir);
+    } else {
+      await prefs.setString(_keyDownloadDir, downloadDir!);
+    }
+  }
+
+  /// 保存 / 清除 SAF 授权目录。清除时同时清掉展示名。
+  Future<void> setDownloadDirTree(String? uri, String? label) async {
+    final value = (uri == null || uri.isEmpty) ? null : uri;
+    downloadDirTree = value;
+    downloadDirLabel = value == null ? null : (label ?? '');
+    final prefs = await SharedPreferences.getInstance();
+    if (value == null) {
+      await prefs.remove(_keyDownloadDirTree);
+      await prefs.remove(_keyDownloadDirLabel);
+    } else {
+      await prefs.setString(_keyDownloadDirTree, value);
+      await prefs.setString(_keyDownloadDirLabel, downloadDirLabel ?? '');
+    }
+  }
+
+  Future<void> setLanguage(String value) async {
+    language = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyLanguage, value);
+  }
+
+  Future<void> setGridView(bool value) async {
+    gridView = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyGridView, value);
+  }
+
+  // ------------------------------------------------------------------ backup
+
+  /// 备份用：导出全部设置项（键名与存储键一致）。
+  Map<String, Object?> toJson() => {
+    _keyLanguage: language,
+    _keyDownloadDir: downloadDir,
+    _keyDownloadDirTree: downloadDirTree,
+    _keyDownloadDirLabel: downloadDirLabel,
+    _keyGridView: gridView,
+    _keyLaunchPage: launchPage,
+    _keyHomeFolderOpen: homeFolderOpenMode,
+    _keyCacheFolders: cacheFolders,
+    _keyLoadAllPages: loadAllPages,
+    _keyThemeMode: themeMode,
+    _keyOled: oledBlack,
+    _keyDynamicColor: dynamicColor,
+    _keyDynamicColorChosen: dynamicColorChosen,
+    _keySeed: themeSeed,
+    _keyInterval: requestInterval,
+    _keyMaxUp: maxUploads,
+    _keyMaxDown: maxDownloads,
+    _keyDownloadConnections: downloadConnections,
+    _keyApiHost: apiHost,
+    _keyUserAgent: userAgent,
+    _keyUploadPath: uploadPath,
+    _keySwipeTabs: swipeTabs,
+    _keyHideTopBar: hideTopBar,
+    _keyHideBottomBar: hideBottomBar,
+    _keyFloatingNav: floatingNavBar,
+    _keyTransitions: transitionAnimations,
+    _keyNotifyProgress: notifyProgress,
+    _keyNotifyDone: notifyDone,
+    _keySortMode: sortMode,
+    _keyQuickExpanded: quickExpanded,
+    _keyRecentsExpanded: recentsExpanded,
+    _keyRecentLimit: recentLimit,
+    _keyClipboardLink: clipboardLinkPrompt,
+    _keyNavTransfers: navShowTransfers,
+    _keyNavFavorites: navShowFavorites,
+    _keyMotionMode: motionMode,
+  };
+
+  /// 恢复备份里的设置：只接受已知键，空值表示恢复为未设置，最后重新读取一次。
+  Future<void> applyJson(Map<String, Object?> json) async {
+    final prefs = await SharedPreferences.getInstance();
+    final known = toJson().keys.toSet();
+    for (final entry in json.entries) {
+      if (!known.contains(entry.key)) continue;
+      final value = entry.value;
+      if (value == null || (value is String && value.isEmpty)) {
+        if (entry.key == _keyUserAgent) {
+          await prefs.setString(entry.key, '');
+        } else {
+          await prefs.remove(entry.key);
+        }
+      } else if (value is bool) {
+        await prefs.setBool(entry.key, value);
+      } else if (value is int) {
+        await prefs.setInt(entry.key, value);
+      } else if (value is double) {
+        await prefs.setDouble(entry.key, value);
+      } else {
+        await prefs.setString(entry.key, '$value');
+      }
+    }
+    await load();
+  }
+
+  static int normalizeDownloadConnections(int value) {
+    if (value < 1) return 1;
+    if (value > 4) return 4;
+    return value;
+  }
+}

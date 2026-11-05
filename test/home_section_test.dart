@@ -1,0 +1,127 @@
+import 'package:material_ui/material_ui.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:lancloud/l10n/app_localizations.dart';
+import 'package:lancloud/ui/common.dart';
+import 'package:lancloud/ui/m3e.dart';
+
+import 'package:lancloud/l10n/delegates.dart';
+
+void main() {
+  testWidgets('SectionCard 折叠后隐藏内容并旋转三角，展开后恢复', (tester) async {
+    var expanded = true;
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: appLocalizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        locale: const Locale('zh'),
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: StatefulBuilder(
+              builder: (context, setState) => SectionCard(
+                title: '快速访问',
+                expanded: expanded,
+                onToggle: () => setState(() => expanded = !expanded),
+                child: const Text('内容'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('内容'), findsOneWidget);
+    expect(
+      tester.widget<AnimatedRotation>(find.byType(AnimatedRotation)).turns,
+      0.25,
+    );
+
+    // 折叠按钮是标题行右侧的 MD3E 图标按钮（点标题文字不再触发）
+    await tester.tap(find.byType(M3eIconButton));
+    await tester.pumpAndSettle();
+    // 内容常驻在树里（整组高度过渡，条目不会重建），但被裁到 0 高
+    expect(find.text('内容'), findsOneWidget);
+    expect(tester.getSize(find.byType(SizeTransition)).height, 0);
+    expect(
+      tester.widget<AnimatedRotation>(find.byType(AnimatedRotation)).turns,
+      0,
+    );
+
+    await tester.tap(find.byType(M3eIconButton));
+    await tester.pumpAndSettle();
+    expect(find.text('内容'), findsOneWidget);
+    expect(tester.getSize(find.byType(SizeTransition)).height, greaterThan(0));
+  });
+
+  // 读屏读成一项，但触摸只有右侧按钮生效：标题行整行不再可点（避免误触）
+  testWidgets('SectionCard 标题行不响应触摸，只有展开按钮可点', (tester) async {
+    var expanded = true;
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: appLocalizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        locale: const Locale('zh'),
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: StatefulBuilder(
+              builder: (context, setState) => SectionCard(
+                title: '快速访问',
+                expanded: expanded,
+                onToggle: () => setState(() => expanded = !expanded),
+                child: const Text('内容'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 点标题文字：不展开也不收起
+    await tester.tapAt(tester.getCenter(find.text('快速访问')));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(find.byType(SizeTransition)).height, greaterThan(0));
+
+    // 点右侧按钮：正常收起
+    await tester.tap(find.byType(M3eIconButton));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(find.byType(SizeTransition)).height, 0);
+  });
+
+  testWidgets('SectionCard 出现/隐藏内容时高度动画过渡', (tester) async {
+    var expanded = true;
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: appLocalizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        locale: const Locale('zh'),
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: StatefulBuilder(
+              builder: (context, setState) => SectionCard(
+                title: '最近使用',
+                expanded: expanded,
+                onToggle: () => setState(() => expanded = !expanded),
+                child: const SizedBox(height: 200, width: 200),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    final fullHeight = tester.getSize(find.byType(SectionCard)).height;
+    expect(fullHeight, greaterThan(200));
+
+    await tester.tap(find.byType(M3eIconButton));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100)); // 动画进行中
+    final midHeight = tester.getSize(find.byType(SectionCard)).height;
+    expect(midHeight, greaterThan(0));
+    expect(midHeight, lessThan(fullHeight));
+
+    await tester.pumpAndSettle();
+    final collapsed = tester.getSize(find.byType(SectionCard)).height;
+    expect(collapsed, lessThan(midHeight));
+    // 折叠后只剩标题行（展开按钮 48 + 上下留白）
+    expect(collapsed, lessThan(120));
+  });
+}

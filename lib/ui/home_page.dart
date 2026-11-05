@@ -1,0 +1,715 @@
+import 'package:material_ui/material_ui.dart' hide Icons;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../core/account_state.dart';
+import '../core/api/lanzou_client.dart';
+import '../core/api/lanzou_client_registry.dart';
+import '../core/data/app_db.dart';
+import '../core/data/app_db_provider.dart';
+import '../core/drive_state.dart';
+import '../core/lanzou_link.dart';
+import '../core/list_home_settings_state.dart';
+import '../core/navigation_appearance_settings_state.dart';
+import '../core/navigation_state.dart';
+import '../core/transfer/transfer_manager_provider.dart';
+import '../l10n/l10n.dart';
+import 'app_icons.dart';
+import 'common.dart';
+import 'drive_page.dart';
+import 'm3e.dart';
+import 'qr_scan.dart';
+import 'scroll_tint.dart';
+import 'share_file_sheet.dart';
+import 'share_page.dart';
+import 'transfer_running_count.dart';
+
+/// 快速访问条目 ⋯ 菜单里的动作。
+enum _QuickPinAction { open, removePin, moveToTop }
+
+/// 最近使用条目 ⋯ 菜单里的动作。
+enum _RecentAction { open, toggleFavorite, deleteRecord }
+
+class HomePage extends ConsumerStatefulWidget {
+  const HomePage({super.key, this.tabIndex});
+
+  /// 外壳中的 page 视图下标；作为独立路由打开时为 null（不响应切换通知）。
+  final int? tabIndex;
+
+  @override
+  ConsumerState<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends ConsumerState<HomePage>
+    with AutomaticKeepAliveClientMixin {
+  List<RecentItem> _recents = [];
+  List<PinItem> _quick = [];
+
+  /// 正在播放删除动画的条目（动画播完再真正删库）
+  final Set<String> _removingQuick = {};
+  final Set<String> _removingRecents = {};
+  bool _loading = true;
+  bool _quickExpanded = true;
+  bool _recentsExpanded = true;
+  late final AppDb _db;
+
+  late final NavigationState _navigation;
+  late final DriveState _drive;
+  late final ListHomeSettingsState _listHome;
+  final ScrollController _scroll = ScrollController();
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _db = ref.read(appDbProvider);
+    _navigation = ref.read(navigationStateProvider);
+    _drive = ref.read(driveStateProvider);
+    _listHome = ref.read(listHomeSettingsStateProvider);
+    _quickExpanded = _listHome.quickExpanded;
+    _recentsExpanded = _listHome.recentsExpanded;
+    _load();
+    _db.revision.addListener(_load);
+    _navigation.activeTab.addListener(_onActiveTabChanged);
+  }
+
+  @override
+  void dispose() {
+    _db.revision.removeListener(_load);
+    _navigation.activeTab.removeListener(_onActiveTabChanged);
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// 切到本视图时刷新本地数据（收藏/最近使用可能已在别处变化）。
+  void _onActiveTabChanged() {
+    if (widget.tabIndex == null) return;
+    if (_navigation.activeTab.value == widget.tabIndex) {
+      _load();
+    }
+  }
+
+  /// 识别二维码：底部弹窗选择「拍照获取 / 从相册选取」（都不需要相机权限），
+  /// 识别到蓝奏云分享链接后直接打开解析弹窗。
+  Future<void> _scanQr() async {
+    final l10n = context.l10n;
+    final source = await showQrSourceSheet(context);
+    if (source == null || !mounted) return;
+    final raw = await scanQrFromImage(context, source);
+    if (!mounted || raw == null) return;
+    final link = LanzouLink.parse(raw);
+    if (link == null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(l10n.scanNotLanzou)));
+      return;
+    }
+    await openShareSheet(context, initialLink: link.url, initialPwd: link.pwd);
+  }
+
+  /// 展开 / 折叠「快速访问」，状态记在设置里（重启后保持）。
+  Future<void> _toggleQuickExpanded() async {
+    setState(() => _quickExpanded = !_quickExpanded);
+    await _listHome.setQuickExpanded(_quickExpanded);
+  }
+
+  Future<void> _toggleRecentsExpanded() async {
+    setState(() => _recentsExpanded = !_recentsExpanded);
+    await _listHome.setRecentsExpanded(_recentsExpanded);
+  }
+
+  /// 点顶栏空白处回到列表顶部（与网盘页一致）。
+  void _scrollToTop() {
+    if (!_scroll.hasClients) return;
+    _scroll.animateTo(
+      0,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
+  }
+
+  /// 快速访问条目：名称 + 该目录路径，右侧 ⋯ 打开菜单。
+  Widget _quickItem(
+    BuildContext context,
+    PinItem item, {
+    required bool first,
+    required int index,
+  }) {
+    final l10n = context.l10n;
+    final scheme = Theme.of(context).colorScheme;
+    final removing = _removingQuick.contains(item.ref);
+    // 菜单要贴在被点的 ⋯ 下方，所以这里得拿到行 / 按钮各自的 context
+    return Builder(
+      builder: (BuildContext rowContext) => Md3ListItem(
+        key: ValueKey('quick-${item.ref}'),
+        index: index,
+        removing: removing,
+        icon: Icons.folder,
+        iconColor: scheme.primary,
+        title: item.name,
+        subtitle: quickAccessPathLabel(l10n, item),
+        trailing: Builder(
+          builder: (BuildContext buttonContext) => M3eIconButton(
+            tooltip: l10n.moreActions,
+            icon: Icons.more_vert,
+            onPressed: () =>
+                _showPinMenu(item, first: first, anchorContext: buttonContext),
+          ),
+        ),
+        // 桌面端右键：与 ⋯ 菜单同一套操作
+        onSecondaryTap: (Offset position) => _showPinMenu(
+          item,
+          first: first,
+          anchorContext: rowContext,
+          pointerPosition: position,
+        ),
+        onTap: () => _openItem(context, 'folder', item.ref, item.name, ''),
+      ),
+    );
+  }
+
+  /// 最近使用条目：文件夹用实心图标，文件图标按类型着色。
+  Widget _recentItem(BuildContext context, int i, AppLocalizations l10n) {
+    final item = _recents[i];
+    final isFolder = item.kind.toLowerCase().contains('folder');
+    final scheme = Theme.of(context).colorScheme;
+    // 菜单要贴在被点的 ⋯ 下方，所以这里得拿到行 / 按钮各自的 context
+    return Builder(
+      builder: (BuildContext rowContext) => Md3ListItem(
+        key: ValueKey('recent-${item.ref}'),
+        index: i,
+        removing: _removingRecents.contains(item.ref),
+        icon: isFolder ? Icons.folder : iconForFile(item.name),
+        iconColor: isFolder
+            ? scheme.primary
+            : fileIconColor(item.name, brightness: scheme.brightness),
+        title: item.name,
+        subtitle: item.kind.startsWith('share')
+            ? l10n.sharedContent
+            : l10n.myDrive,
+        trailing: Builder(
+          builder: (BuildContext buttonContext) => M3eIconButton(
+            tooltip: l10n.moreActions,
+            icon: Icons.more_vert,
+            onPressed: () => _showRecentMenu(item, buttonContext),
+          ),
+        ),
+        // 桌面端右键：与 ⋯ 菜单同一套操作
+        onSecondaryTap: (Offset position) =>
+            _showRecentMenu(item, rowContext, pointerPosition: position),
+        onTap: () =>
+            _openItem(context, item.kind, item.ref, item.name, item.pwd),
+      ),
+    );
+  }
+
+  /// 快速访问菜单：取消固定；不在顶部时可以移到顶部。
+  ///
+  /// [anchorContext] 是那颗 ⋯ 按钮（桌面端右键时是整行）的 context——
+  /// 菜单贴它下方右对齐弹出。
+  Future<void> _showPinMenu(
+    PinItem item, {
+    required bool first,
+    required BuildContext anchorContext,
+    Offset? pointerPosition,
+  }) async {
+    final l10n = context.l10n;
+    final anchor = m3eMenuAnchorOf(anchorContext);
+    if (anchor == null) return;
+    final _QuickPinAction? action = await showM3eMenu<_QuickPinAction>(
+      context: context,
+      anchor: anchor,
+      pointerPosition: pointerPosition,
+      // ⋯ 贴着右边缘：菜单右缘对齐，免得被屏幕右上角夹歪
+      alignEnd: true,
+      items: [
+        M3eMenuItem(
+          value: _QuickPinAction.open,
+          label: l10n.open,
+          icon: Icons.open_in_new,
+        ),
+        M3eMenuItem(
+          value: _QuickPinAction.removePin,
+          label: l10n.removeFromQuickAccess,
+          icon: Icons.keep_off,
+        ),
+        if (!first)
+          M3eMenuItem(
+            value: _QuickPinAction.moveToTop,
+            label: l10n.moveToTop,
+            icon: Icons.vertical_align_top,
+          ),
+      ],
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case _QuickPinAction.open:
+        _openItem(context, 'folder', item.ref, item.name, '');
+      case _QuickPinAction.removePin:
+        // 先播放删除动画，再真正删库（列表由 db.revision 通知刷新）
+        setState(() => _removingQuick.add(item.ref));
+        await Future<void>.delayed(const Duration(milliseconds: 220));
+        if (!mounted) return;
+        await _db.removePin(item.ref);
+      case _QuickPinAction.moveToTop:
+        await _db.movePinToTop(item.ref);
+    }
+  }
+
+  /// 最近使用菜单：打开 / 收藏（已收藏则显示取消收藏）/ 删除此条记录。
+  ///
+  /// [anchorContext] 是那颗 ⋯ 按钮（桌面端右键时是整行）的 context。
+  Future<void> _showRecentMenu(
+    RecentItem item,
+    BuildContext anchorContext, {
+    Offset? pointerPosition,
+  }) async {
+    final l10n = context.l10n;
+    final anchor = m3eMenuAnchorOf(anchorContext);
+    if (anchor == null) return;
+    // 菜单项是静态的：先把收藏链接 / 收藏态查出来，避免出现「已收藏却显示收藏」
+    // 这种状态相反的项。分享条目查本地收藏表（很快）；网盘条目要先取一次分享
+    // 链接（与网盘页的收藏行为一致）。
+    final shareUrl = await _recentShareUrl(item);
+    if (!mounted) return;
+    final favorited =
+        shareUrl != null && await isFavoritedByRef(context, shareUrl);
+    if (!mounted) return;
+    final _RecentAction? action = await showM3eMenu<_RecentAction>(
+      context: context,
+      anchor: anchor,
+      pointerPosition: pointerPosition,
+      // ⋯ 贴着右边缘：菜单右缘对齐，免得被屏幕右上角夹歪
+      alignEnd: true,
+      items: [
+        M3eMenuItem(
+          value: _RecentAction.open,
+          label: l10n.open,
+          icon: Icons.open_in_new,
+        ),
+        M3eMenuItem(
+          value: _RecentAction.toggleFavorite,
+          label: favorited ? l10n.unfavorite : l10n.favorite,
+          // 取消收藏用 Remix 的 star-off-line（描边）；「收藏」保持描边星星
+          icon: favorited ? Icons.star_off_line : Icons.star_outline,
+        ),
+        M3eMenuItem(
+          value: _RecentAction.deleteRecord,
+          label: l10n.deleteRecord,
+          icon: Icons.playlist_remove,
+        ),
+      ],
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case _RecentAction.open:
+        _openItem(context, item.kind, item.ref, item.name, item.pwd);
+      case _RecentAction.toggleFavorite:
+        // 用菜单打开时查到的链接；菜单打开期间状态可能变了（比如退出了登录），
+        // 那就再取一次，取不到给个提示而不是静默失败
+        final url = shareUrl ?? await _recentShareUrl(item);
+        if (!mounted) return;
+        if (url == null) {
+          showAppToast(context, l10n.shareInfoUnavailable);
+          return;
+        }
+        await toggleFavoriteByRef(
+          context,
+          kind: item.kind == 'folder' ? 'shareFolder' : 'shareFile',
+          name: item.name,
+          ref: url,
+          pwd: item.pwd,
+        );
+      case _RecentAction.deleteRecord:
+        setState(() => _removingRecents.add(item.ref));
+        await Future<void>.delayed(const Duration(milliseconds: 220));
+        if (!mounted) return;
+        final uid = ref.read(accountStateProvider).store.activeUid ?? '';
+        await _db.removeRecent(account: uid, ref: item.ref);
+    }
+  }
+
+  /// 最近使用条目的分享链接：收藏表就是按分享链接存、按分享链接去重的，
+  /// 分享条目直接用 `ref`；网盘文件 / 目录要先取一次分享信息。
+  Future<String?> _recentShareUrl(RecentItem item) async {
+    if (item.kind == 'shareFile' || item.kind == 'shareFolder') {
+      return item.ref;
+    }
+    final client = _activeClient();
+    if (client == null) return null;
+    try {
+      final info = item.kind == 'folder'
+          ? await client.shareInfoOfFolder(item.ref)
+          : await client.shareInfoOfFile(item.ref);
+      return info.url;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  LanzouClient? _activeClient() {
+    final accounts = ref.read(accountStateProvider).store;
+    final uid = accounts.activeUid;
+    if (uid == null) return null;
+    return ref
+        .read(lanzouClientRegistryProvider)
+        .clientFor(uid, cookie: accounts.byUid(uid)?.cookie);
+  }
+
+  Future<void> _load() async {
+    final uid = ref.read(accountStateProvider).store.activeUid ?? '';
+    try {
+      final recents = await _db.recents(uid, limit: 6);
+      final pins = await _db.pins(uid);
+      if (!mounted) return;
+      setState(() {
+        _recents = recents;
+        _quick = pins;
+        _loading = false;
+        // 数据已刷新：清理删除动画标记。清早了会让还没从列表消失的条目
+        // 反向展开（先上移再下移），所以统一放在这里。
+        _removingQuick.clear();
+        _removingRecents.clear();
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _openItem(
+    BuildContext context,
+    String kind,
+    String ref,
+    String name,
+    String pwd,
+  ) async {
+    switch (kind) {
+      case 'folder':
+        if (_listHome.homeFolderOpenMode == 'drive') {
+          // 跳转网盘视图并加载到该目录
+          _drive.folderRequest.value = ref;
+          _navigation.switchTab(1);
+        } else {
+          await Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              // 大屏下独立打开的网盘页同样套 MD3E 卡片
+              builder: (_) => Md3ePageFrame(
+                topBarHeight:
+                    MediaQuery.paddingOf(context).top +
+                    kToolbarHeight +
+                    kDrivePathBarHeight,
+                hide: _navigation.topBarHide,
+                child: DrivePage(initialFolderId: ref, initialName: name),
+              ),
+            ),
+          );
+        }
+      case 'file':
+        await _showOwnFileActions(context, ref, name);
+      case 'shareFile':
+        await showAppSheet<void>(
+          context,
+          child: ShareFileInfoSheet(name: name, url: ref, pwd: pwd),
+        );
+      case 'shareFolder':
+        await openShareSheet(context, initialLink: ref, initialPwd: pwd);
+    }
+    if (mounted) _load();
+  }
+
+  Future<void> _showOwnFileActions(
+    BuildContext context,
+    String fileId,
+    String name,
+  ) async {
+    // 与其它弹窗一致：走统一外壳（MD3E 底部弹窗 + 自适应高度）。
+    await showAppSheet<void>(
+      context,
+      child: SheetListGroup(
+        margin: SheetListGroup.endMargin,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.download_outlined),
+            title: Text(context.l10n.download),
+            onTap: () async {
+              Navigator.of(context).pop();
+              final client = _activeClient();
+              if (client == null) return;
+              try {
+                final info = await client.shareInfoOfFile(fileId);
+                if (!context.mounted) return;
+                await downloadShareFile(
+                  context,
+                  url: info.url,
+                  pwd: info.pwd,
+                  fallbackName: name,
+                );
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(context.l10n.lanzouError(e))),
+                  );
+                }
+              }
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.link_outlined),
+            title: Text(context.l10n.copyLink),
+            onTap: () async {
+              Navigator.of(context).pop();
+              final client = _activeClient();
+              if (client == null) return;
+              try {
+                final info = await client.shareInfoOfFile(fileId);
+                if (!context.mounted) return;
+                await copyText(
+                  context,
+                  info.pwd.isEmpty
+                      ? info.url
+                      : context.l10n.linkWithPassword(info.url, info.pwd),
+                );
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(context.l10n.lanzouError(e))),
+                  );
+                }
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final appearance = ref.watch(navigationAppearanceSettingsStateProvider);
+    final manager = ref.watch(transferManagerProvider);
+    return ListenableBuilder(
+      listenable: appearance.revision,
+      builder: (context, _) => TransferRunningCount(
+        manager: manager,
+        builder: (context, running) =>
+            _buildPage(context, appearance.hideTopBar, _navigation, running),
+      ),
+    );
+  }
+
+  Widget _buildPage(
+    BuildContext context,
+    bool hideTopBar,
+    NavigationState navigation,
+    int running,
+  ) {
+    final l10n = context.l10n;
+    final scheme = Theme.of(context).colorScheme;
+    final headerHeight = MediaQuery.paddingOf(context).top + kToolbarHeight;
+    return Scaffold(
+      // 大屏外壳里的页面：背景交给外壳的圆角卡片
+      backgroundColor: transparentPageBackground(context)
+          ? Colors.transparent
+          : null,
+      body: Stack(
+        children: [
+          // 小屏：正文区整体让开左右挖孔 / 侧边导航栏；顶栏（浮层）保持原样
+          BodySideInset(
+            child: ScrollTint(
+              hideDistance: headerHeight,
+              readBarsHidden: () => navigation.topBarHide.value,
+              onBarsHidden: hideTopBar
+                  ? navigation.setTopBarHideFromScroll
+                  : null,
+              // 列表快速滑动条（可拖拽）
+              child: FastScrollbar(
+                controller: _scroll,
+                // 顶栏是浮层：滑块从顶栏下方开始，底部让开底栏
+                padding: EdgeInsets.only(
+                  top: headerHeight,
+                  bottom: shellBottomBarInset(context),
+                ),
+                child: CustomScrollView(
+                  controller: _scroll,
+                  slivers: [
+                    // 顶栏不占布局，这里留出等高占位
+                    SliverToBoxAdapter(child: SizedBox(height: headerHeight)),
+                    // 入口按钮：横向滚动，左右边距用 padding 实现，
+                    // 这样滑到头也不会被裁掉；按钮间距 = 卡片边距（20dp），
+                    // 顶部留白与左右一致
+                    SliverToBoxAdapter(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ExpressiveIconButton(
+                              icon: Icons.open_in_new,
+                              label: l10n.openLink,
+                              onPressed: () => openShareSheet(context),
+                            ),
+                            const SizedBox(width: 20),
+                            ExpressiveIconButton(
+                              icon: Icons.qr_code,
+                              label: l10n.scanButton,
+                              onPressed: _scanQr,
+                            ),
+                            const SizedBox(width: 20),
+                            ExpressiveIconButton(
+                              icon: Icons.swap_vert,
+                              label: l10n.transferCenter,
+                              badge: running > 0 ? '$running' : null,
+                              onPressed: () => navigation.switchTab(2),
+                            ),
+                            const SizedBox(width: 20),
+                            ExpressiveIconButton(
+                              icon: Icons.star_border,
+                              label: l10n.favorite,
+                              onPressed: () => navigation.switchTab(3),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                    SliverPadding(
+                      // 底部留白交给最后一个 SectionCard 自带的 16dp
+                      //（它内部还带 4dp 分组外边距），与其他页面保持一致
+                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                      // 整块布局：避免懒布局估算导致滚动条滑块抖动（见 SliverColumn）
+                      sliver: SliverColumn(
+                        children: [
+                          SectionCard(
+                            title: l10n.quickAccess,
+                            expanded: _quickExpanded,
+                            onToggle: _toggleQuickExpanded,
+                            child: _quick.isEmpty
+                                ? SegmentedList(
+                                    children: [
+                                      // 空状态卡片略高一点：图标外框和卡片边缘
+                                      // 之间留出呼吸感
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          vertical: 8,
+                                        ),
+                                        child: EmptyHint(
+                                          icon: Icons.push_pin_outlined,
+                                          text: l10n.quickAccessHint,
+                                          // 首页两张空状态卡片比页面级的空状态
+                                          // 更紧凑：形状外框 64dp（其他 72dp）
+                                          frameSize: 64,
+                                          iconSize: 32,
+                                        ),
+                                      ),
+                                    ],
+                                  )
+                                : SegmentedList(
+                                    adaptive: true,
+                                    children: [
+                                      for (var i = 0; i < _quick.length; i++)
+                                        _quickItem(
+                                          context,
+                                          _quick[i],
+                                          first: i == 0,
+                                          index: i,
+                                        ),
+                                    ],
+                                  ),
+                          ),
+                          SectionCard(
+                            title: l10n.recent,
+                            expanded: _recentsExpanded,
+                            onToggle: _toggleRecentsExpanded,
+                            child: _loading
+                                ? const Padding(
+                                    padding: EdgeInsets.all(16),
+                                    child: Center(child: M3eLoadingIndicator()),
+                                  )
+                                : (_recents.isEmpty
+                                      ? SegmentedList(
+                                          children: [
+                                            Padding(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    vertical: 8,
+                                                  ),
+                                              child: EmptyHint(
+                                                icon: Icons.history,
+                                                text: l10n.noRecent,
+                                                frameSize: 64,
+                                                iconSize: 32,
+                                              ),
+                                            ),
+                                          ],
+                                        )
+                                      : SegmentedList(
+                                          adaptive: true,
+                                          children: [
+                                            for (
+                                              var i = 0;
+                                              i < _recents.length;
+                                              i++
+                                            )
+                                              _recentItem(context, i, l10n),
+                                          ],
+                                        )),
+                          ),
+                        ],
+                      ),
+                    ),
+                    // 底栏盖在正文上方（extendBody）时，补足列表末尾留白
+                    SliverToBoxAdapter(
+                      child: SizedBox(height: shellBottomBarInset(context)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          // 顶栏浮层：与底栏共用收起进度，切换视图时会下滑出现
+          Positioned(
+            left: 0,
+            right: 0,
+            top: 0,
+            child: TopBarOverlay(
+              height: headerHeight,
+              background: topBarBackgroundColor(context, scheme),
+              // 点顶栏空白处回到列表顶部（按钮自行响应，不会误触）
+              builder: (context) => GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: _scrollToTop,
+                child: AppBar(
+                  backgroundColor: Colors.transparent,
+                  scrolledUnderElevation: 0,
+                  title: Text(l10n.currentAppDisplayName),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 快速访问副标题：显示该文件夹「所在目录」的路径（不含文件夹自身），
+/// 例如 根目录/abc/示例 → 根目录/abc；「根目录」按当前语言显示。
+///
+/// 兼容早期数据：那时 path 存的是「根目录 + 完整路径 + 文件夹自身」，
+/// 且「根目录」是固定时语言写死的，这里会识别任意支持语言的写法后剥掉。
+String quickAccessPathLabel(AppLocalizations l10n, PinItem item) {
+  var segments = item.path.split('/').where((s) => s.isNotEmpty).toList();
+  if (segments.isNotEmpty && isRootLabelSegment(segments.first)) {
+    segments = segments.sublist(1);
+    if (segments.isNotEmpty && segments.last == item.name) {
+      segments = segments.sublist(0, segments.length - 1);
+    }
+  }
+  return [l10n.root, ...segments].join('/');
+}
+
+/// 是否是「根目录」在任一支持语言下的写法（旧数据固定的是固定时的语言）。
+bool isRootLabelSegment(String segment) => AppLocalizations.supportedLocales
+    .any((locale) => lookupAppLocalizations(locale).root == segment);

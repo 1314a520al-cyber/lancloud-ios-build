@@ -1,0 +1,5109 @@
+import 'dart:io';
+import 'dart:math' as math;
+
+import 'package:file_picker/file_picker.dart';
+import 'package:material_ui/material_ui.dart' hide Icons;
+import 'package:lpinyin/lpinyin.dart';
+import 'package:path/path.dart' as p;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../core/account_state.dart';
+import '../core/api/lanzou_client.dart';
+import '../core/api/lanzou_client_registry.dart';
+import '../core/api/models.dart';
+import '../core/cache_page_settings_state.dart';
+import '../core/data/app_db.dart';
+import '../core/data/app_db_provider.dart';
+import '../core/drive_cache.dart';
+import '../core/drive_state.dart';
+import '../core/file_picker_channel.dart';
+import '../core/list_home_settings_state.dart';
+import '../core/navigation_appearance_settings_state.dart';
+import '../core/navigation_state.dart';
+import '../core/platform_support.dart';
+import '../core/transfer/transfer_manager.dart';
+import '../core/transfer/transfer_manager_provider.dart';
+import '../l10n/l10n.dart';
+import 'app_icons.dart';
+import 'common.dart';
+import 'download_mark.dart';
+import 'm3e.dart';
+import 'reduce_motion.dart';
+import 'scroll_tint.dart';
+
+const int kFreeUploadLimit = 100 * 1024 * 1024;
+
+/// 目录进入动画：总时长要容纳常见一屏条目的错峰起点；单项动画与步长
+/// 仍保持原来的 232 / 26ms，后续条目再按列表数量缩放到可用时间内。
+const Duration _driveEnterDuration = Duration(milliseconds: 720);
+const double _driveEnterDurationMs = 720;
+const double _driveEnterItemDurationMs = 232;
+const double _driveEnterStepMs = 26;
+
+/// 网盘页文件条目 ⋯ 菜单里的动作。
+enum _FileMenuAction { properties, copyLink, move, editInfo, password, delete }
+
+/// 网盘页文件夹条目 ⋯ 菜单里的动作。
+enum _FolderMenuAction {
+  open,
+  properties,
+  copyLink,
+  password,
+  editInfo,
+  delete,
+}
+
+class DrivePage extends ConsumerStatefulWidget {
+  const DrivePage({
+    super.key,
+    this.initialFolderId = '-1',
+    this.initialName,
+    this.tabIndex,
+  });
+
+  final String initialFolderId;
+  final String? initialName;
+
+  /// 外壳中的 page 视图下标；作为独立路由打开时为 null（不响应切换通知）。
+  final int? tabIndex;
+
+  @override
+  ConsumerState<DrivePage> createState() => _DrivePageState();
+}
+
+class _DrivePageState extends ConsumerState<DrivePage>
+    with
+        TickerProviderStateMixin,
+        AutomaticKeepAliveClientMixin,
+        WidgetsBindingObserver {
+  static const _anim = Duration(milliseconds: 200);
+
+  @override
+  bool get wantKeepAlive => true;
+
+  late final AnimationController _selAnim = AnimationController(
+    vsync: this,
+    duration: _anim,
+  );
+
+  /// 目录切换：当前内容先淡出（[_exitAnim]），新内容再按 index 错峰淡入。
+  /// 整张列表共享同一个 [_enterAnim]，滑动时新构建的条目只会读到当前进度，
+  /// 所以“逐个显现”只在目录加载完成后播放一次，滑动不会重播。
+  late final AnimationController _enterAnim = AnimationController(
+    vsync: this,
+    duration: _driveEnterDuration,
+    value: 1,
+  );
+
+  late final AnimationController _exitAnim = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 170),
+  );
+
+  late final Animation<double> _contentFade = Tween<double>(
+    begin: 1,
+    end: 0,
+  ).animate(CurvedAnimation(parent: _exitAnim, curve: Curves.easeIn));
+
+  /// 局部刷新的行内动画状态：正在淡出 / 刚出现 / 刚被修改的条目 id。
+  final Set<String> _removingFiles = {};
+  final Set<String> _removingFolders = {};
+  final Set<String> _appearingFiles = {};
+  final Set<String> _appearingFolders = {};
+  final Set<String> _pulsingFiles = {};
+  final Set<String> _pulsingFolders = {};
+  bool _directorySwitching = false;
+  int _enterFolderCount = 1;
+  int _enterFileCount = 1;
+
+  final ScrollController _scroll = ScrollController();
+  final TextEditingController _searchController = TextEditingController();
+
+  late String _folderId = widget.initialFolderId;
+  List<PathNode> _path = [];
+  List<LzFolder> _folders = [];
+  List<LzFile> _files = [];
+  int _page = 1;
+  bool _hasMore = false;
+  bool _loading = true;
+  bool _loadingMore = false;
+
+  /// 上一次拉取下一页失败（且还有下一页）：底部给出「重试」入口。
+  bool _loadFailed = false;
+
+  /// 自动补页失败后的剩余重试次数：网络抖一下也能自己恢复。
+  int _autoRetriesLeft = _maxAutoRetries;
+  static const int _maxAutoRetries = 3;
+
+  /// 已经排了下一帧的补页检查；同一帧里重复调用只排一次。
+  bool _fillCheckScheduled = false;
+  String? _error;
+  bool _searching = false;
+  String _filter = '';
+  String _sortMode = 'default';
+  final Map<String, double> _folderOffsets = {};
+  bool _selecting = false;
+  final Set<String> _selectedFiles = {};
+  final Set<String> _selectedFolders = {};
+
+  /// 键盘是否弹出（悬浮底栏的 FAB 留白跟随它，见 didChangeMetrics）。
+  final ValueNotifier<bool> _keyboardUp = ValueNotifier(false);
+  late final AccountState _accounts;
+  late final NavigationState _navigation;
+  late final DriveState _drive;
+  late final AppDb _db;
+  late final CachePageSettingsState _cacheSettings;
+  late final ListHomeSettingsState _listHome;
+  late final NavigationAppearanceSettingsState _appearance;
+
+  /// 传输管理器：注册与注销监听成对，dispose 时不能再读 context
+  /// （元素正在卸载，InheritedWidget 查询会抛 "Null check operator used
+  /// on a null value"），所以 initState 里存下来。
+  late TransferManager _transfers;
+
+  /// 拖拽判定用的探针：当前是否"可见地"处于网盘页（底栏 tab 或独立路由）。
+  late final bool Function() _dropProbe = _visibleAsDropTarget;
+
+  bool _visibleAsDropTarget() {
+    if (!mounted) return false;
+    final route = ModalRoute.of(context);
+    if (route != null && !route.isCurrent) return false;
+    // 底栏形态：只有当前激活的 tab 才算；独立页面：在最上层就算
+    if (route == null || route.isFirst) {
+      return widget.tabIndex != null &&
+          _dependenciesReady &&
+          _navigation.activeTab.value == widget.tabIndex;
+    }
+    return true;
+  }
+
+  /// didChangeDependencies 之前还不能启用目录可见性探针，用这个标记兜底。
+  bool _dependenciesReady = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // initState 里不能做 InheritedWidget 查询（View.of 会触发 debug 断言），
+    // 这里直接读窗口指标；didChangeMetrics 之后照旧用 View.of。
+    _keyboardUp.value =
+        WidgetsBinding
+            .instance
+            .platformDispatcher
+            .views
+            .first
+            .viewInsets
+            .bottom >
+        0;
+    _accounts = ref.read(accountStateProvider);
+    _navigation = ref.read(navigationStateProvider);
+    _drive = ref.read(driveStateProvider);
+    _db = ref.read(appDbProvider);
+    _cacheSettings = ref.read(cachePageSettingsStateProvider);
+    _listHome = ref.read(listHomeSettingsStateProvider);
+    _appearance = ref.read(navigationAppearanceSettingsStateProvider);
+    _sortMode = _listHome.sortMode;
+    _transfers = ref.read(transferManagerProvider)
+      ..addTaskListener(_onTaskDone);
+    if (widget.initialName != null) {
+      _path = [PathNode(id: widget.initialFolderId, name: widget.initialName!)];
+    }
+    _scroll.addListener(_onScroll);
+    _drive.folderRequest.addListener(_onDriveFolderRequest);
+    if (_drive.folderRequest.value != null) {
+      // 首页请求的目录：直接加载目标目录，不再先加载根目录
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _onDriveFolderRequest(),
+      );
+    } else {
+      _load();
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _drive.removeDriveProbe(_dropProbe);
+    _keyboardUp.dispose();
+    _drive.folderRequest.removeListener(_onDriveFolderRequest);
+    _transfers.removeTaskListener(_onTaskDone);
+    if (_isShellPage) {
+      _navigation.onDriveBack = null;
+      // 外壳里的网盘页卸载后不再拦截返回，交回系统（预测性返回桌面）。
+      _navigation.driveCanHandleBack.value = false;
+    }
+    if (_selecting) {
+      _navigation.setSelectionMode(false);
+      _navigation.onRequestExitSelection = null;
+    }
+    _selAnim.dispose();
+    _enterAnim.dispose();
+    _exitAnim.dispose();
+    _scroll.dispose();
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    if (!mounted) return;
+    // 底栏外壳的 Scaffold 会消耗键盘 inset（页面内 MediaQuery.viewInsets 归零），
+    // 所以直接读窗口的原始 inset 判断键盘是否弹出；只在状态变化时通知 FAB 重建。
+    _keyboardUp.value = View.of(context).viewInsets.bottom > 0;
+  }
+
+  /// 系统「移除动画 / 减弱动态效果」：initState 里查不了 MediaQuery
+  /// （同步命中目录缓存时会走到那儿），在 didChangeDependencies 缓存一份。
+  bool _systemReduceMotion = false;
+
+  bool get _animationsEnabled =>
+      _appearance.transitionAnimations && !_systemReduceMotion;
+
+  /// 首页选择“网盘页打开”时：跳转到请求的目录。
+  void _onDriveFolderRequest() {
+    final folderId = _drive.folderRequest.value;
+    if (folderId == null) return;
+    _drive.folderRequest.value = null;
+    if (!mounted) return;
+    _openFolderById(folderId);
+  }
+
+  /// 直接定位到指定目录（路径由接口返回，从根目录算起）。
+  Future<void> _openFolderById(String folderId) async {
+    if (_directorySwitching || folderId == _folderId) return;
+    _directorySwitching = true;
+    try {
+      _navigation.animateBarsHide(0, reduceMotion: _systemReduceMotion);
+      _rememberFolderOffset();
+      await _animateDirectorySwitch(folderId);
+      if (!mounted) return;
+      setState(() {
+        _folderId = folderId;
+        _filter = '';
+        _searchController.clear();
+        _path = const [];
+      });
+      await _load();
+      if (!mounted) return;
+      _restoreFolderOffset(folderId);
+    } finally {
+      _endDirectorySwitch();
+    }
+  }
+
+  /// 上传完成后，若目标是当前目录，只刷新文件列表（局部刷新）。
+  void _onTaskDone(TransferTask task) {
+    if (task.kind != TransferKind.upload ||
+        task.folderId != _folderId ||
+        !mounted) {
+      return;
+    }
+    _refreshInPlace();
+  }
+
+  LanzouClient? _activeClient() {
+    final accounts = _accounts.store;
+    final uid = accounts.activeUid;
+    if (uid == null) return null;
+    return ref
+        .read(lanzouClientRegistryProvider)
+        .clientFor(uid, cookie: accounts.byUid(uid)?.cookie);
+  }
+
+  /// 局部刷新：保持当前列表可见，拉取完成后按差异播放新增/移除动画。
+  /// [refreshFolders] 为 true 时同时重新拉取文件夹列表（新建/移动之后需要）。
+  Future<bool> _refreshInPlace({bool refreshFolders = false}) async {
+    final client = _activeClient();
+    if (client == null) return false;
+    try {
+      // 已经加载过几页就刷新几页，避免局部刷新把后面的条目吞掉
+      final listing = await _fetchListing(
+        client,
+        maxPages: math.max(_page, 1),
+        withFolders: refreshFolders,
+      );
+      if (!mounted) return false;
+      _applyListing(
+        folders: refreshFolders ? listing.folders : _folders,
+        files: listing.files,
+        page: listing.page,
+        hasMore: listing.hasMore,
+      );
+      return true;
+    } catch (_) {
+      // 局部刷新失败不打扰用户，下拉或菜单刷新可兜底
+      return false;
+    }
+  }
+
+  /// 拉取当前目录快照；[maxPages] 控制最多加载多少页（默认按“全部加载”设置）。
+  Future<_Listing> _fetchListing(
+    LanzouClient client, {
+    int? maxPages,
+    bool withFolders = true,
+  }) async {
+    final foldersResult = withFolders
+        ? await client.listFolders(_folderId)
+        : null;
+    final limit = maxPages ?? (_cacheSettings.loadAllPages ? 60 : 1);
+    final first = await client.listFilesPage(_folderId, 1);
+    var files = first.files;
+    var hasMore = first.hasMore;
+    var page = 1;
+    while (hasMore && page < limit) {
+      page += 1;
+      final next = await client.listFilesPage(_folderId, page);
+      files = [...files, ...next.files];
+      hasMore = next.hasMore;
+    }
+    return _Listing(
+      folders: foldersResult?.folders ?? const [],
+      files: files,
+      path: foldersResult?.path ?? const [],
+      page: page,
+      hasMore: hasMore,
+    );
+  }
+
+  /// 把最新快照合并进列表：新增条目渐入、消失条目留在原位淡出，
+  /// 动画结束后再对齐到全量快照。
+  void _applyListing({
+    required List<LzFolder> folders,
+    required List<LzFile> files,
+    int? page,
+    bool? hasMore,
+    List<PathNode>? path,
+  }) {
+    final animate = _animationsEnabled;
+    final oldFolders = _folders;
+    final oldFiles = _files;
+    final oldFolderIds = {for (final f in oldFolders) f.id};
+    final oldFileIds = {for (final f in oldFiles) f.id};
+    final folderIds = {for (final f in folders) f.id};
+    final fileIds = {for (final f in files) f.id};
+    final addedFolders = folderIds.difference(oldFolderIds);
+    final addedFiles = fileIds.difference(oldFileIds);
+    final goneFolders = animate
+        ? oldFolderIds.difference(folderIds)
+        : const <String>{};
+    final goneFiles = animate
+        ? oldFileIds.difference(fileIds)
+        : const <String>{};
+
+    setState(() {
+      _removingFolders.addAll(goneFolders);
+      _removingFiles.addAll(goneFiles);
+      _appearingFolders.addAll(addedFolders);
+      _appearingFiles.addAll(addedFiles);
+      _folders = goneFolders.isEmpty
+          ? folders
+          : _mergeVanishing(oldFolders, folders, goneFolders, (f) => f.id);
+      _files = goneFiles.isEmpty
+          ? files
+          : _mergeVanishing(oldFiles, files, goneFiles, (f) => f.id);
+      _page = page ?? _page;
+      _hasMore = hasMore ?? _hasMore;
+      if (path != null) _path = path;
+    });
+
+    if (addedFolders.isNotEmpty || addedFiles.isNotEmpty) {
+      Future<void>.delayed(const Duration(milliseconds: 420), () {
+        if (!mounted) return;
+        setState(() {
+          _appearingFolders.removeAll(addedFolders);
+          _appearingFiles.removeAll(addedFiles);
+        });
+      });
+    }
+    if (goneFolders.isNotEmpty || goneFiles.isNotEmpty) {
+      Future<void>.delayed(const Duration(milliseconds: 240), () {
+        if (!mounted) return;
+        setState(() {
+          _removingFolders.removeAll(goneFolders);
+          _removingFiles.removeAll(goneFiles);
+          _folders = folders;
+          _files = files;
+        });
+        _updateCacheSnapshot();
+      });
+    } else {
+      _updateCacheSnapshot();
+    }
+  }
+
+  /// 保留正在淡出的旧条目，并按原索引插回结果，避免它们瞬间消失。
+  List<T> _mergeVanishing<T>(
+    List<T> oldList,
+    List<T> newList,
+    Set<String> goneIds,
+    String Function(T item) idOf,
+  ) {
+    final result = [...newList];
+    for (var i = 0; i < oldList.length; i++) {
+      final item = oldList[i];
+      if (!goneIds.contains(idOf(item))) continue;
+      result.insert(math.min(i, result.length), item);
+    }
+    return result;
+  }
+
+  /// 先播放移除动画再从列表里移除；无动画时直接移除。
+  Future<void> _removeItemsWithAnimation({
+    Set<String> fileIds = const {},
+    Set<String> folderIds = const {},
+  }) async {
+    if (fileIds.isEmpty && folderIds.isEmpty) return;
+    if (_animationsEnabled) {
+      setState(() {
+        _removingFiles.addAll(fileIds);
+        _removingFolders.addAll(folderIds);
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      if (!mounted) return;
+    }
+    setState(() {
+      _removingFiles.removeAll(fileIds);
+      _removingFolders.removeAll(folderIds);
+      _files.removeWhere((f) => fileIds.contains(f.id));
+      _folders.removeWhere((f) => folderIds.contains(f.id));
+    });
+    _updateCacheSnapshot();
+  }
+
+  /// 条目内容被修改后播放一次高亮闪烁。
+  void _pulseItems({
+    Set<String> fileIds = const {},
+    Set<String> folderIds = const {},
+  }) {
+    if (!_animationsEnabled || (fileIds.isEmpty && folderIds.isEmpty)) return;
+    setState(() {
+      _pulsingFiles.addAll(fileIds);
+      _pulsingFolders.addAll(folderIds);
+    });
+    Future<void>.delayed(const Duration(milliseconds: 720), () {
+      if (!mounted) return;
+      setState(() {
+        _pulsingFiles.removeAll(fileIds);
+        _pulsingFolders.removeAll(folderIds);
+      });
+    });
+  }
+
+  /// 目录切换动画：先淡出当前内容，再把已收起的悬浮顶栏顺势滑下来
+  /// （滑动的过程发生在内容淡出之后，视觉上只有顶栏在动），
+  /// 然后调用方才真正切换数据。等新内容就绪后再播放错峰出现动画。
+  Future<void> _animateDirectorySwitch(String targetFolderId) async {
+    if (!_animationsEnabled || _loading) return;
+    await _exitAnim.forward(from: 0);
+    if (!mounted || !_scroll.hasClients) return;
+    final target = _folderOffsets[targetFolderId] ?? 0;
+    final from = _scroll.position.pixels;
+    if (target >= from) return;
+    await _scroll.animateTo(
+      target,
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  /// 内容就绪：恢复不透明度并播放一次错峰出现动画。
+  void _playEnterAnimation() {
+    // 在本次动画开始时固定分组数量。自动补页可能紧接着追加条目；
+    // 继续用新总数重算步长会让正在播放的条目突然跳变。
+    _enterFolderCount = math.max(1, _folders.length);
+    _enterFileCount = math.max(1, _files.length);
+    if (!_animationsEnabled) {
+      _enterAnim.value = 1;
+      return;
+    }
+    _enterAnim.forward(from: 0);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _systemReduceMotion = reduceMotionOf(context);
+    _dependenciesReady = true;
+    _drive.addDriveProbe(_dropProbe); // 拖拽判定：当前网盘页是否可见
+    if (_isShellPage) {
+      _navigation.onDriveBack = _handleDriveBack;
+    }
+    // 首次挂载后同步一次返回能力（例如 initState 里同步命中的目录缓存）。
+    // didChangeDependencies 发生在 build 期间，直接改 notifier 会让 RootShell
+    // 在 build 中重建，所以放到当前帧结束之后。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _publishCanHandleBack();
+    });
+    // 换账号兜底：页面状态如果被保留下来，也要丢掉上一个账号的目录内容
+    final uid = _accounts.store.activeUid;
+    if (_loadedUid == null) {
+      _loadedUid = uid;
+    } else if (_loadedUid != uid) {
+      _loadedUid = uid;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _resetForAccount());
+    }
+  }
+
+  /// 路径 / 搜索 / 多选都通过 [setState] 改动，统一在改动后同步返回能力，
+  /// 避免漏掉某个状态点导致返回手势被错误地交给系统（那一按就会退出应用）。
+  @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    _publishCanHandleBack();
+  }
+
+  /// 当前已加载数据的账号，用于换账号时重置页面。
+  String? _loadedUid;
+
+  /// 换账号：清掉目录内容并回到根目录重新加载（缓存已按账号清空）。
+  void _resetForAccount() {
+    if (!mounted) return;
+    _folderOffsets.clear();
+    _searchController.clear();
+    setState(() {
+      _folderId = '-1';
+      _path = const [];
+      _folders = [];
+      _files = [];
+      _filter = '';
+      _searching = false;
+      _page = 1;
+      _hasMore = false;
+      _loading = true;
+      _error = null;
+    });
+    _load(force: true);
+  }
+
+  /// 是否是外壳底栏里的网盘页：只有它参与 RootShell 的返回决策，
+  /// 独立路由打开的网盘页（首页 → 目录）由路由自己维护返回栈。
+  bool get _isShellPage =>
+      widget.initialFolderId == '-1' && widget.initialName == null;
+
+  /// 当前网盘页是否要自己消费返回手势：多选 > 搜索栏 > 上一级目录。
+  bool get _canHandleBack => _selecting || _searching || _path.isNotEmpty;
+
+  /// 上报给 RootShell（见 NavigationState.driveCanHandleBack）：需要消费返回时
+  /// 置 true，由 Flutter 拦截手势；false 时交给系统，系统才会播放
+  /// 「退回桌面」的预测性返回动画。
+  void _publishCanHandleBack() {
+    if (!_dependenciesReady || !_isShellPage) return;
+    final notifier = _navigation.driveCanHandleBack;
+    final value = _canHandleBack;
+    if (notifier.value != value) notifier.value = value;
+  }
+
+  /// 返回键：多选 > 搜索栏 > 上一级目录 > 交给外壳处理
+  Future<bool> _handleDriveBack() async {
+    if (_selecting) {
+      _exitSelection();
+      return true;
+    }
+    if (_searching) {
+      _closeSearch();
+      return true;
+    }
+    if (_path.isNotEmpty) {
+      await _jumpTo(_path.length - 2);
+      return true;
+    }
+    return false;
+  }
+
+  /// 关闭搜索栏并清空过滤条件。
+  void _closeSearch() {
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      _searching = false;
+      _filter = '';
+      _searchController.clear();
+    });
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final pixels = _scroll.position.pixels;
+    if (pixels >= _scroll.position.maxScrollExtent - 320) {
+      _loadMore();
+    }
+  }
+
+  CachedFolder _snapshot() => CachedFolder(
+    folders: _folders,
+    files: _files,
+    path: _path,
+    page: _page,
+    hasMore: _hasMore,
+  );
+
+  void _updateCacheSnapshot() {
+    if (_cacheSettings.cacheFolders) {
+      _drive.cache.put(_folderId, _snapshot());
+    }
+  }
+
+  Future<void> _load({bool force = false}) async {
+    final client = _activeClient();
+    if (client == null) return;
+
+    final cached = _cacheSettings.cacheFolders
+        ? _drive.cache.get(_folderId)
+        : null;
+    if (!force && cached != null) {
+      _exitAnim.value = 0;
+      setState(() {
+        _folders = cached.folders;
+        _files = cached.files;
+        _path = _folderId == '-1'
+            ? const <PathNode>[]
+            : (cached.path.isEmpty ? _path : cached.path);
+        _page = cached.page;
+        _hasMore = cached.hasMore;
+        _loading = false;
+        _loadFailed = false;
+        _autoRetriesLeft = _maxAutoRetries;
+        _error = null;
+      });
+      _playEnterAnimation();
+      // 缓存里也还留着「还有下一页」时，同样按需补页
+      _fillViewportIfNeeded();
+      return;
+    }
+
+    // 旧内容已经淡出，加载指示器需要恢复可见
+    _exitAnim.value = 0;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final listing = await _fetchListing(client);
+      if (!mounted) return;
+      _exitAnim.value = 0;
+      setState(() {
+        _folders = listing.folders;
+        _path = _folderId == '-1'
+            ? const <PathNode>[]
+            : (listing.path.isEmpty ? _path : listing.path);
+        _files = listing.files;
+        _page = listing.page;
+        _hasMore = listing.hasMore;
+        _loading = false;
+        _loadFailed = false;
+        _autoRetriesLeft = _maxAutoRetries;
+        _selectedFiles.clear();
+        _selectedFolders.clear();
+        _removingFiles.clear();
+        _removingFolders.clear();
+        _appearingFiles.clear();
+        _appearingFolders.clear();
+        _pulsingFiles.clear();
+        _pulsingFolders.clear();
+      });
+      _playEnterAnimation();
+      // 目录内容不足一屏时继续补页，让「已经到底了」立刻可见
+      _fillViewportIfNeeded();
+      if (_cacheSettings.cacheFolders) {
+        _drive.cache.put(_folderId, _snapshot());
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = context.l10n.lanzouError(e);
+        _loading = false;
+      });
+    }
+  }
+
+  /// 加载下一页文件；[auto] 表示这次是「内容不满一屏，自动补页」发起的。
+  Future<void> _loadMore({bool auto = false}) async {
+    if (_loading || _directorySwitching || _loadingMore || !_hasMore) return;
+    if (_filter.isNotEmpty) return;
+    final client = _activeClient();
+    if (client == null) return;
+    setState(() {
+      _loadingMore = true;
+      _loadFailed = false;
+    });
+    try {
+      final next = await client.listFilesPage(_folderId, _page + 1);
+      if (!mounted) return;
+      setState(() {
+        _files = [..._files, ...next.files];
+        _page += 1;
+        _hasMore = next.hasMore;
+        _loadingMore = false;
+      });
+      _autoRetriesLeft = _maxAutoRetries;
+      if (_cacheSettings.cacheFolders) {
+        _drive.cache.put(_folderId, _snapshot());
+      }
+      // 内容还不满一屏时继续补页：否则「已经到底了」要等用户滑一下才出现
+      _fillViewportIfNeeded();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loadingMore = false;
+        _loadFailed = true;
+      });
+      // 自动补页失败：退避重试几次，别让短目录停在「什么都没有」的状态
+      if (auto && _autoRetriesLeft > 0) {
+        _autoRetriesLeft -= 1;
+        Future<void>.delayed(const Duration(milliseconds: 700), () {
+          if (!mounted) return;
+          // 定时器链路上没有帧在跑，直接查一次（不用等 post-frame）
+          _fillViewportIfNeeded(immediate: true);
+        });
+      }
+    }
+  }
+
+  /// 内容不足一屏时继续加载下一页（最多到填满或加载完为止）。
+  ///
+  /// 默认排到下一帧再判断（此时布局刚更新）；[immediate] 用于定时器重试这类
+  /// 没有帧在跑的场景，直接按当前布局判断。
+  void _fillViewportIfNeeded({bool immediate = false}) {
+    if (!mounted || !_hasMore || _loading || _loadingMore) return;
+    if (_directorySwitching || _filter.isNotEmpty) return;
+    if (!immediate) {
+      if (_fillCheckScheduled) return;
+      _fillCheckScheduled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _fillCheckScheduled = false;
+        _fillViewportIfNeeded(immediate: true);
+      });
+      // post-frame 回调不会自己排帧：界面静止时它会一直悬着
+      WidgetsBinding.instance.scheduleFrame();
+      return;
+    }
+    if (!_scroll.hasClients) return;
+    // 与滚动加载共用同一个预加载阈值
+    if (_scroll.position.maxScrollExtent <= _scroll.position.pixels + 320) {
+      _loadMore(auto: true);
+    }
+  }
+
+  Future<void> _reloadAfterChange() async {
+    _drive.cache.clear();
+    await _load(force: true);
+  }
+
+  List<LzFolder> get _visibleFolders {
+    final query = _filter.toLowerCase();
+    final list = _folders
+        .where((f) => query.isEmpty || f.name.toLowerCase().contains(query))
+        .toList();
+    if (_sortMode == 'name') {
+      list.sort((a, b) => _nameSortKey(a.name).compareTo(_nameSortKey(b.name)));
+    }
+    return list;
+  }
+
+  String _nameSortKey(String name) => PinyinHelper.getPinyinE(
+    name,
+    separator: '',
+    defPinyin: '~',
+  ).toLowerCase();
+
+  List<LzFile> get _visibleFiles {
+    final query = _filter.toLowerCase();
+    final list = _files
+        .where((f) => query.isEmpty || f.name.toLowerCase().contains(query))
+        .toList();
+    switch (_sortMode) {
+      case 'size':
+        list.sort(
+          (a, b) => lzSizeToBytes(b.size).compareTo(lzSizeToBytes(a.size)),
+        );
+      case 'default':
+        break;
+      default:
+        list.sort(
+          (a, b) => _nameSortKey(a.name).compareTo(_nameSortKey(b.name)),
+        );
+    }
+    return list;
+  }
+
+  void _enterSelection({String? fileId, String? folderId}) {
+    final wasSelecting = _selecting;
+    setState(() {
+      _selecting = true;
+      if (fileId != null) _selectedFiles.add(fileId);
+      if (folderId != null) _selectedFolders.add(folderId);
+    });
+    _selAnim.forward();
+    _navigation.onRequestExitSelection = _exitSelection;
+    _navigation.setSelectionMode(true);
+    // 只在「刚进入多选」时播报，继续长按其它条目不再重复
+    if (!wasSelecting) announceEnteredMultiSelect(context);
+  }
+
+  void _exitSelection() {
+    setState(() {
+      _selecting = false;
+      _selectedFiles.clear();
+      _selectedFolders.clear();
+    });
+    _selAnim.reverse();
+    _navigation.onRequestExitSelection = null;
+    _navigation.setSelectionMode(false);
+  }
+
+  /// 切换单个文件 / 文件夹的选中态；选中数归零时自动退出多选。
+  void _toggleFileSelection(String id) {
+    setState(() {
+      if (!_selectedFiles.remove(id)) _selectedFiles.add(id);
+    });
+    if (_selectedFiles.isEmpty && _selectedFolders.isEmpty) _exitSelection();
+  }
+
+  void _toggleFolderSelection(String id) {
+    setState(() {
+      if (!_selectedFolders.remove(id)) _selectedFolders.add(id);
+    });
+    if (_selectedFiles.isEmpty && _selectedFolders.isEmpty) _exitSelection();
+  }
+
+  void _selectAll() {
+    setState(() {
+      _selectedFiles.addAll(_visibleFiles.map((f) => f.id));
+      _selectedFolders.addAll(_visibleFolders.map((f) => f.id));
+    });
+    if (_selectedFiles.isEmpty && _selectedFolders.isEmpty) _exitSelection();
+  }
+
+  void _invertSelection() {
+    setState(() {
+      for (final id in _visibleFiles.map((f) => f.id)) {
+        if (!_selectedFiles.remove(id)) _selectedFiles.add(id);
+      }
+      for (final id in _visibleFolders.map((f) => f.id)) {
+        if (!_selectedFolders.remove(id)) _selectedFolders.add(id);
+      }
+    });
+    if (_selectedFiles.isEmpty && _selectedFolders.isEmpty) _exitSelection();
+  }
+
+  PreferredSizeWidget _selectionAppBar(int count) => AppBar(
+    key: const ValueKey('selection-appbar'),
+    // 底色由外层 Material（topBarBackgroundColor）提供，与普通顶栏一致
+    backgroundColor: Colors.transparent,
+    scrolledUnderElevation: 0,
+    leading: IconButton(
+      tooltip: context.l10n.exitSelection,
+      icon: const Icon(Icons.close),
+      onPressed: _exitSelection,
+    ),
+    title: Text(context.l10n.selectedCount(count)),
+    actions: [
+      IconButton(
+        tooltip: context.l10n.selectAll,
+        icon: const Icon(Icons.select_all),
+        onPressed: _selectAll,
+      ),
+      IconButton(
+        tooltip: context.l10n.invertSelection,
+        icon: const Icon(Icons.flip),
+        onPressed: _invertSelection,
+      ),
+    ],
+  );
+
+  Future<void> _openFolder(LzFolder folder) async {
+    if (_selecting) {
+      _toggleFolderSelection(folder.id);
+      return;
+    }
+    if (_directorySwitching) return;
+    _directorySwitching = true;
+    try {
+      await _db.addRecent(
+        account: _accounts.store.activeUid ?? '',
+        kind: 'folder',
+        name: folder.name,
+        ref: folder.id,
+        limit: _listHome.recentLimit,
+      );
+      // 进入新目录时若顶/底栏处于收起状态，先带动画恢复显示，
+      // 否则目录内容较少无法滚动时底栏就唤不出来。
+      _navigation.animateBarsHide(0, reduceMotion: _systemReduceMotion);
+      _rememberFolderOffset();
+      await _animateDirectorySwitch(folder.id);
+      if (!mounted) return;
+      setState(() {
+        _folderId = folder.id;
+        _path = [..._path, PathNode(id: folder.id, name: folder.name)];
+        _filter = '';
+        _searchController.clear();
+      });
+      await _load();
+      if (!mounted) return;
+      _restoreFolderOffset(folder.id);
+    } finally {
+      _endDirectorySwitch();
+    }
+  }
+
+  Future<void> _jumpTo(int index) async {
+    if (_directorySwitching) return;
+    _directorySwitching = true;
+    try {
+      _navigation.animateBarsHide(0, reduceMotion: _systemReduceMotion);
+      final newPath = index < 0 ? <PathNode>[] : _path.sublist(0, index + 1);
+      final targetId = newPath.isEmpty ? '-1' : newPath.last.id;
+      _rememberFolderOffset();
+      await _animateDirectorySwitch(targetId);
+      if (!mounted) return;
+      setState(() {
+        _path = newPath;
+        _folderId = targetId;
+        _filter = '';
+        _searchController.clear();
+      });
+      await _load();
+      if (!mounted) return;
+      _restoreFolderOffset(targetId);
+    } finally {
+      _endDirectorySwitch();
+    }
+  }
+
+  /// 目录切换（进文件夹 / 路径跳转 / 首页请求打开目录）收尾。
+  ///
+  /// 切换期间 `_load` 末尾那次补页检查会被 [_directorySwitching] 挡住，
+  /// 内容长度没变化时也不会有 ScrollMetricsNotification；这里再补一次，
+  /// 否则条目少的目录要等用户滑一下才出现「已经到底了」。
+  void _endDirectorySwitch() {
+    _directorySwitching = false;
+    _fillViewportIfNeeded();
+  }
+
+  void _rememberFolderOffset() {
+    if (_scroll.hasClients) {
+      _folderOffsets[_folderId] = _scroll.position.pixels;
+    }
+  }
+
+  void _restoreFolderOffset(String folderId) {
+    final target = _folderOffsets[folderId] ?? 0;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _scroll.hasClients) {
+        final max = _scroll.position.maxScrollExtent;
+        final to = target.clamp(0.0, max);
+        final from = _scroll.position.pixels;
+        // 回到列表顶部时让悬浮顶栏顺势滑下来（下移显示），
+        // 而不是 jumpTo 造成的瞬间出现。
+        final slideTopBar = _animationsEnabled && _appearance.hideTopBar;
+        if (slideTopBar && to < from) {
+          _scroll.animateTo(
+            to,
+            duration: const Duration(milliseconds: 240),
+            curve: Curves.easeOutCubic,
+          );
+        } else {
+          _scroll.jumpTo(to);
+        }
+      }
+    });
+  }
+
+  void _scrollToTop() {
+    if (_scroll.hasClients) {
+      _scroll.animateTo(
+        0,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  /// 网盘菜单：底部弹窗承载布局、排序与列表操作。
+  Future<void> _showDriveMenu() async {
+    var grid = _cacheSettings.gridView;
+    var sort = _sortMode;
+    final isRoot = _folderId == '-1';
+    await showAppSheet<void>(
+      context,
+      child: StatefulBuilder(
+        builder: (sheetContext, setSheetState) => Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 分组小标题 + 按钮组：标题用统一的 M3eSectionHeader
+            M3eSectionHeader(context.l10n.layout, horizontalInset: 20),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: SizedBox(
+                width: double.infinity,
+                child: M3eConnectedButtonGroup<String>(
+                  values: const ['grid', 'list'],
+                  selected: grid ? 'grid' : 'list',
+                  onSelected: (value) {
+                    setSheetState(() => grid = value == 'grid');
+                    _cacheSettings.setGridView(grid);
+                  },
+                  labelOf: (value) => Text(
+                    value == 'grid' ? context.l10n.grid : context.l10n.list,
+                  ),
+                  iconOf: (value) =>
+                      Icon(value == 'grid' ? Icons.grid_view : Icons.view_list),
+                ),
+              ),
+            ),
+            M3eSectionHeader(context.l10n.sort, horizontalInset: 20),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: SizedBox(
+                width: double.infinity,
+                child: M3eConnectedButtonGroup<String>(
+                  values: const ['default', 'name', 'size'],
+                  selected: sort,
+                  onSelected: (value) {
+                    setSheetState(() => sort = value);
+                    setState(() => _sortMode = value);
+                    _listHome.setSortMode(value);
+                  },
+                  labelOf: (value) => Text(switch (value) {
+                    'name' => context.l10n.sortName,
+                    'size' => context.l10n.sortSize,
+                    _ => context.l10n.sortTime,
+                  }),
+                ),
+              ),
+            ),
+            SheetListGroup(
+              // 与上面的按钮组分开：上边距用列表的左右边距同值（16dp）；
+              // 作为弹窗内容最后一块，下边距同样与左右同值（16dp）
+              margin: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.checklist),
+                  title: Text(context.l10n.multiSelect),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    _enterSelection();
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.refresh),
+                  title: Text(context.l10n.refresh),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    _reloadAfterChange();
+                  },
+                ),
+                if (!isRoot)
+                  ListTile(
+                    leading: const Icon(Icons.info_outline),
+                    title: Text(context.l10n.folderProperties),
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      showAppSheet<void>(
+                        context,
+                        child: _FolderInfoSheet(
+                          folder: LzFolder(
+                            id: _folderId,
+                            name: _path.last.name,
+                            desc: '',
+                          ),
+                          page: this,
+                        ),
+                      );
+                    },
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showAddMenu() async {
+    await showAppSheet<void>(
+      context,
+      child: SheetListGroup(
+        margin: SheetListGroup.endMargin,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.create_new_folder_outlined),
+            title: Text(context.l10n.newFolder),
+            onTap: () {
+              Navigator.of(context).pop();
+              _mkdir();
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.upload_file_outlined),
+            title: Text(context.l10n.uploadFile),
+            onTap: () {
+              Navigator.of(context).pop();
+              _upload();
+            },
+          ),
+          // 桌面端没有 ACTION_OPEN_DOCUMENT 那套「从其他应用/文档提供器选取」，
+          // 系统选择器与「上传文件」完全一样，这里不重复给入口。
+          if (PlatformSupport.isMobile)
+            ListTile(
+              leading: const Icon(Icons.file_open),
+              title: Text(context.l10n.uploadFromApp),
+              onTap: () {
+                Navigator.of(context).pop();
+                _uploadFromApp();
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _upload() async {
+    final files = await FilePicker.pickFiles();
+    if (files.isEmpty) return;
+    if (!mounted) return;
+    final transfers = _transfers;
+    var skipped = 0;
+    var added = 0;
+    for (final file in files) {
+      final path = file.path;
+      if (path == null) continue;
+      var size = file.lengthSync();
+      if (size == null) {
+        try {
+          size = await File(path).length();
+        } catch (_) {
+          continue;
+        }
+      }
+      if (size > kFreeUploadLimit) {
+        skipped += 1;
+        continue;
+      }
+      transfers.addUpload(
+        name: file.name,
+        folderId: _folderId,
+        path: path,
+        size: size,
+      );
+      added += 1;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          skipped > 0
+              ? context.l10n.uploadSkipped(added, skipped)
+              : context.l10n.uploadAdded(added),
+        ),
+      ),
+    );
+  }
+
+  /// 从其他应用/文档提供器选取文件上传（ACTION_OPEN_DOCUMENT）。
+  Future<void> _uploadFromApp() async {
+    try {
+      final paths = await ProviderFilePicker.pickFiles();
+      if (paths.isEmpty || !mounted) return;
+      final transfers = _transfers;
+      var added = 0;
+      var skipped = 0;
+      for (final path in paths) {
+        final size = await File(path).length();
+        if (size > kFreeUploadLimit) {
+          skipped += 1;
+          continue;
+        }
+        transfers.addUpload(
+          name: p.basename(path),
+          folderId: _folderId,
+          path: path,
+          size: size,
+        );
+        added += 1;
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            skipped > 0
+                ? context.l10n.uploadSkipped(added, skipped)
+                : context.l10n.uploadTasksAdded(added),
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.lanzouError(e))));
+    }
+  }
+
+  Future<void> _mkdir() async {
+    // 控制器由弹窗自己持有（见 _ItemFormDialog）
+    final result = await showDialog<({String name, String desc})>(
+      context: context,
+      builder: (_) => _ItemFormDialog(
+        title: context.l10n.newFolder,
+        confirmLabel: context.l10n.create,
+      ),
+    );
+    if (result == null || !mounted) return;
+    // 名称为空由弹窗自己的 error state 拦住，到这里一定非空
+    final name = result.name;
+    try {
+      await _activeClient()?.mkdir(_folderId, name, desc: result.desc);
+      // 局部刷新：只重新拉取文件夹列表，新文件夹淡入出现
+      final ok = await _refreshInPlace(refreshFolders: true);
+      if (!ok) await _reloadAfterChange();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.lanzouError(e))));
+    }
+  }
+
+  /// 删除前的确认弹窗：默认 MD3 弹窗 + 消极（取消）/ 积极（删除）按钮，
+  /// 与设置里的弹窗同款；单条与批量删除共用。
+  Future<bool> _confirmDelete(String message) async {
+    final l10n = context.l10n;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(l10n.deleteConfirmTitle),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(l10n.cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(l10n.delete),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  Future<void> _deleteSelected() async {
+    final count = _selectedFiles.length + _selectedFolders.length;
+    if (count == 0) return;
+    final l10n = context.l10n;
+    if (!await _confirmDelete(l10n.deleteConfirmMessage(count))) return;
+    if (!mounted) return;
+    final client = _activeClient();
+    if (client == null) return;
+    final fileIds = _selectedFiles.toList();
+    final folderIds = _selectedFolders.toList();
+    final fileNames = {for (final f in _files) f.id: f.name};
+    final folderNames = {for (final f in _folders) f.id: f.name};
+    try {
+      await runBatchWithProgress(
+        context,
+        title: context.l10n.delete,
+        total: fileIds.length + folderIds.length,
+        run: (report) async {
+          var done = 0;
+          for (final id in fileIds) {
+            report(++done, fileNames[id] ?? '');
+            await client.deleteItem(id: id, isFile: true);
+          }
+          for (final id in folderIds) {
+            report(++done, folderNames[id] ?? '');
+            await client.deleteItem(id: id, isFile: false);
+          }
+        },
+      );
+      // 删掉的目录若固定在快速访问里，一并移除
+      if (folderIds.isNotEmpty) await _db.removePins(folderIds);
+      if (!mounted) return;
+      _exitSelection();
+      await _removeItemsWithAnimation(
+        fileIds: fileIds.toSet(),
+        folderIds: folderIds.toSet(),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.lanzouError(e))));
+    }
+  }
+
+  Future<void> _batchDownload() async {
+    if (_selectedFiles.isEmpty) return;
+    final transfers = _transfers;
+    final client = _activeClient();
+    final activeUid = _accounts.store.activeUid ?? '';
+    final l10n = context.l10n;
+    final ids = _selectedFiles.toList();
+    final names = {for (final file in _files) file.id: file.name};
+    var added = 0;
+    var skipped = 0;
+    var failed = 0;
+    final messenger = ScaffoldMessenger.of(context);
+    await runBatchWithProgress(
+      context,
+      title: l10n.batchDownload,
+      total: ids.length,
+      run: (report) async {
+        for (var i = 0; i < ids.length; i++) {
+          final id = ids[i];
+          final name = names[id] ?? '';
+          final ref = '$activeUid:$id';
+          report(i + 1, name);
+          if (shouldSkipDriveBatchDownload(ref: ref, transfers: transfers)) {
+            skipped += 1;
+            continue;
+          }
+          try {
+            final info = await client!.shareInfoOfFile(id, withDetails: false);
+            transfers.addDownload(
+              url: '',
+              name: info.name.isEmpty ? name : info.name,
+              referer: info.url,
+              pwd: info.pwd,
+              refId: ref,
+            );
+            added += 1;
+          } catch (_) {
+            failed += 1;
+          }
+        }
+      },
+    );
+    if (!mounted) return;
+    _exitSelection();
+    final summary = switch ((skipped, failed)) {
+      (0, 0) => l10n.addedDownloads(added),
+      (0, _) => l10n.addedDownloadsPartial(added, failed),
+      (_, 0) => l10n.addedDownloadsSkipped(added, skipped),
+      _ => l10n.addedDownloadsPartialSkipped(added, skipped, failed),
+    };
+    messenger.showSnackBar(SnackBar(content: Text(summary)));
+  }
+
+  /// 批量复制分享链接（提取码一起复制）。
+  Future<void> _batchCopyLinks() async {
+    final fileIds = _selectedFiles.toList();
+    final folderIds = _selectedFolders.toList();
+    if (fileIds.isEmpty && folderIds.isEmpty) return;
+    final client = _activeClient();
+    final l10n = context.l10n;
+    final lines = <String>[];
+    final fileNames = {for (final f in _files) f.id: f.name};
+    final folderNames = {for (final f in _folders) f.id: f.name};
+    await runBatchWithProgress(
+      context,
+      title: l10n.copyLink,
+      total: fileIds.length + folderIds.length,
+      run: (report) async {
+        var done = 0;
+        for (final id in fileIds) {
+          final name = fileNames[id] ?? '';
+          report(++done, name);
+          try {
+            final info = await client!.shareInfoOfFile(id);
+            lines.add(
+              info.pwd.isEmpty
+                  ? '$name ${info.url}'
+                  : l10n.linkWithPassword('$name ${info.url}', info.pwd),
+            );
+          } catch (_) {}
+        }
+        for (final id in folderIds) {
+          final name = folderNames[id] ?? '';
+          report(++done, name);
+          try {
+            final info = await client!.shareInfoOfFolder(id);
+            final linkName = info.name.isEmpty ? name : info.name;
+            lines.add(
+              info.pwd.isEmpty
+                  ? '$linkName ${info.url}'
+                  : l10n.linkWithPassword('$linkName ${info.url}', info.pwd),
+            );
+          } catch (_) {}
+        }
+      },
+    );
+    if (!mounted) return;
+    _exitSelection();
+    if (lines.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(l10n.noLinksToCopy)));
+      return;
+    }
+    await copyText(context, lines.join('\n'));
+  }
+
+  Future<void> _batchFavorite() async {
+    final client = _activeClient();
+    final db = _db;
+    final sharer = _accounts.store.active?.nickname ?? '';
+    final fileIds = _selectedFiles.toList();
+    final folderIds = _selectedFolders.toList();
+    var count = 0;
+    var failed = 0;
+    if (client != null) {
+      final files = {for (final f in _files) f.id: f};
+      final folders = {for (final f in _folders) f.id: f};
+      await runBatchWithProgress(
+        context,
+        title: context.l10n.favorite,
+        total: fileIds.length + folderIds.length,
+        run: (report) async {
+          var done = 0;
+          for (final id in fileIds) {
+            final file = files[id];
+            report(++done, file?.name ?? '');
+            try {
+              final info = await client.shareInfoOfFile(id);
+              await db.addFavorite(
+                kind: 'shareFile',
+                name: file?.name ?? '',
+                ref: info.url,
+                pwd: info.pwd,
+                size: file?.size ?? '',
+                sharer: sharer,
+              );
+              count += 1;
+            } catch (_) {
+              failed += 1;
+            }
+          }
+          for (final id in folderIds) {
+            final folder = folders[id];
+            report(++done, folder?.name ?? '');
+            try {
+              final info = await client.shareInfoOfFolder(id);
+              await db.addFavorite(
+                kind: 'shareFolder',
+                name: folder?.name ?? '',
+                ref: info.url,
+                pwd: info.pwd,
+                sharer: sharer,
+              );
+              count += 1;
+            } catch (_) {
+              failed += 1;
+            }
+          }
+        },
+      );
+    }
+    if (mounted) _exitSelection();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          failed == 0
+              ? context.l10n.favoritedCount(count)
+              : context.l10n.favoritedPartial(count, failed),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _batchMore() async {
+    final action = await showAppSheet<String>(
+      context,
+      child: SheetListGroup(
+        margin: SheetListGroup.endMargin,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.drive_file_move_outline),
+            title: Text(context.l10n.move),
+            onTap: () => Navigator.of(context).pop('move'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.edit_note),
+            title: Text(context.l10n.editDesc),
+            onTap: () => Navigator.of(context).pop('desc'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.lock_outline),
+            title: Text(context.l10n.setPassword),
+            onTap: () => Navigator.of(context).pop('pwd'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'move') await _batchMove();
+    if (action == 'desc') await _batchSetDesc();
+    if (action == 'pwd') await _batchSetPasswd();
+  }
+
+  Future<void> _batchMove() async {
+    final client = _activeClient();
+    if (client == null) return;
+    final fileIds = _selectedFiles.toList();
+    final folderIds = _selectedFolders.toList();
+    if (fileIds.isEmpty && folderIds.isEmpty) return;
+    final target = await showFolderPicker(
+      context,
+      client: client,
+      excludeIds: {...fileIds, ...folderIds},
+    );
+    if (target == null || !mounted) return;
+    final fileNames = {for (final f in _files) f.id: f.name};
+    final folderNames = {for (final f in _folders) f.id: f.name};
+    var failed = 0;
+    await runBatchWithProgress(
+      context,
+      title: context.l10n.move,
+      total: fileIds.length + folderIds.length,
+      run: (report) async {
+        var done = 0;
+        for (final id in fileIds) {
+          report(++done, fileNames[id] ?? '');
+          try {
+            await client.moveFile(id, target.folderId);
+          } catch (_) {
+            failed += 1;
+          }
+        }
+        for (final id in folderIds) {
+          report(++done, folderNames[id] ?? '');
+          try {
+            await client.moveFolder(id, target.folderId);
+          } catch (_) {
+            failed += 1;
+          }
+        }
+      },
+    );
+    if (!mounted) return;
+    final count = fileIds.length + folderIds.length;
+    _exitSelection();
+    // 局部刷新：移走的条目原位淡出，其余条目保持不动
+    final ok = await _refreshInPlace(refreshFolders: true);
+    if (!ok) await _reloadAfterChange();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          failed == 0
+              ? context.l10n.movedTo(count, target.name)
+              : context.l10n.movedPartial(count - failed, failed),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _batchSetDesc() async {
+    // 控制器由弹窗自己持有（见 _EditDescDialog）
+    final desc = await showDialog<String>(
+      context: context,
+      builder: (_) => const _EditDescDialog(),
+    );
+    if (desc == null || !mounted) return;
+    final client = _activeClient();
+    if (client == null) return;
+    final fileIds = _selectedFiles.toList();
+    final folderIds = _selectedFolders.toList();
+    final fileNames = {for (final f in _files) f.id: f.name};
+    final folderNames = {for (final f in _folders) f.id: f.name};
+    var failed = 0;
+    await runBatchWithProgress(
+      context,
+      title: context.l10n.editDesc,
+      total: fileIds.length + folderIds.length,
+      run: (report) async {
+        var done = 0;
+        for (final id in fileIds) {
+          report(++done, fileNames[id] ?? '');
+          try {
+            await client.setDesc(id, desc);
+          } catch (_) {
+            failed += 1;
+          }
+        }
+        for (final id in folderIds) {
+          report(++done, folderNames[id] ?? '');
+          try {
+            await client.setFolderDesc(id, desc);
+          } catch (_) {
+            failed += 1;
+          }
+        }
+      },
+    );
+    if (!mounted) return;
+    final count = fileIds.length + folderIds.length;
+    _exitSelection();
+    setState(() {
+      _files = [
+        for (final f in _files)
+          fileIds.contains(f.id)
+              ? LzFile(
+                  id: f.id,
+                  name: f.name,
+                  time: f.time,
+                  size: f.size,
+                  downs: f.downs,
+                  hasPwd: f.hasPwd,
+                  hasDes: true,
+                )
+              : f,
+      ];
+      _folders = [
+        for (final fo in _folders)
+          folderIds.contains(fo.id)
+              ? LzFolder(
+                  id: fo.id,
+                  name: fo.name,
+                  desc: desc,
+                  hasPwd: fo.hasPwd,
+                )
+              : fo,
+      ];
+    });
+    _pulseItems(fileIds: fileIds.toSet(), folderIds: folderIds.toSet());
+    _updateCacheSnapshot();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          failed == 0
+              ? context.l10n.descUpdatedCount(count)
+              : context.l10n.descUpdatedPartial(count - failed, failed),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _batchSetPasswd() async {
+    final fileIds = _selectedFiles.toList();
+    final folderIds = _selectedFolders.toList();
+    final freeTier = _accounts.store.active?.isFreeTier ?? false;
+    // 批量不逐项取密码，默认按“启用”打开（留空即关闭）。
+    // 文件提取码限 2-6 位、文件夹可到 12 位：只选一种时一个输入框就够；
+    // 两种都选时分成两个输入框（文件夹一个、文件一个），各按自己的规则填写。
+    String filePwd;
+    String folderPwd;
+    if (fileIds.isNotEmpty && folderIds.isNotEmpty) {
+      final result = await showBatchPasswordDialog(context, freeTier: freeTier);
+      if (result == null || !mounted) return;
+      filePwd = result.enabled ? result.filePwd : '';
+      folderPwd = result.enabled ? result.folderPwd : '';
+    } else {
+      final result = await showPasswordDialog(
+        context,
+        enabled: true,
+        pwd: '',
+        maxLength: folderIds.isNotEmpty ? 12 : 6,
+        freeTier: freeTier,
+      );
+      if (result == null || !mounted) return;
+      final pwd = result.enabled ? result.pwd : '';
+      filePwd = pwd;
+      folderPwd = pwd;
+    }
+    final client = _activeClient();
+    if (client == null) return;
+    final fileNames = {for (final f in _files) f.id: f.name};
+    final folderNames = {for (final f in _folders) f.id: f.name};
+    var failed = 0;
+    await runBatchWithProgress(
+      context,
+      title: context.l10n.setPassword,
+      total: fileIds.length + folderIds.length,
+      run: (report) async {
+        var done = 0;
+        for (final id in fileIds) {
+          report(++done, fileNames[id] ?? '');
+          try {
+            await client.setPasswd(id, filePwd);
+          } catch (_) {
+            failed += 1;
+          }
+        }
+        for (final id in folderIds) {
+          report(++done, folderNames[id] ?? '');
+          try {
+            await client.setFolderPasswd(id, folderPwd);
+          } catch (_) {
+            failed += 1;
+          }
+        }
+      },
+    );
+    if (!mounted) return;
+    final count = fileIds.length + folderIds.length;
+    _exitSelection();
+    if (!mounted) return;
+    setState(() {
+      _files = [
+        for (final f in _files)
+          fileIds.contains(f.id)
+              ? LzFile(
+                  id: f.id,
+                  name: f.name,
+                  time: f.time,
+                  size: f.size,
+                  downs: f.downs,
+                  hasPwd: filePwd.isNotEmpty,
+                  hasDes: f.hasDes,
+                )
+              : f,
+      ];
+      _folders = [
+        for (final fo in _folders)
+          folderIds.contains(fo.id)
+              ? LzFolder(
+                  id: fo.id,
+                  name: fo.name,
+                  desc: fo.desc,
+                  hasPwd: folderPwd.isNotEmpty,
+                )
+              : fo,
+      ];
+    });
+    _pulseItems(fileIds: fileIds.toSet(), folderIds: folderIds.toSet());
+    _updateCacheSnapshot();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          failed == 0
+              ? (filePwd.isEmpty && folderPwd.isEmpty
+                    ? context.l10n.passwordClearedCount(count)
+                    : context.l10n.passwordSetCount(count))
+              : context.l10n.passwordSetPartial(count - failed, failed),
+        ),
+      ),
+    );
+  }
+
+  /// 本地生成二维码（不经过任何服务器）。
+  Future<void> _showQr(String title, String url, String pwd) async {
+    if (!mounted) return;
+    // 与分享链接里的「显示二维码」共用同一个弹窗
+    await showQrDialog(context, title: title, url: url, pwd: pwd);
+  }
+
+  /// 显示文件的分享链接二维码。
+  ///
+  /// [share] 是属性弹窗已经取回来的分享信息（打开弹窗时为了收藏判定取过），
+  /// 传进来就不再重复请求。
+  Future<void> _showFileQr(LzFile file, {ShareInfo? share}) async {
+    final client = _activeClient();
+    if (client == null) return;
+    try {
+      final info = share ?? await client.shareInfoOfFile(file.id);
+      if (!mounted) return;
+      await _showQr(file.name, info.url, info.pwd);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.lanzouError(e))));
+    }
+  }
+
+  /// 显示文件夹的分享链接二维码；[share] 同上，属性弹窗取过就直接用。
+  Future<void> _showFolderQr(LzFolder folder, {ShareInfo? share}) async {
+    final client = _activeClient();
+    if (client == null) return;
+    try {
+      final info = share ?? await client.shareInfoOfFolder(folder.id);
+      if (!mounted) return;
+      await _showQr(folder.name, info.url, info.pwd);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.lanzouError(e))));
+    }
+  }
+
+  Future<void> _fileActions(LzFile file) async {
+    await _showFileProperties(file);
+  }
+
+  /// 点文件本身：属性弹窗（属性、链接、二维码、下载、收藏）
+  ///
+  /// 简介与下载数变动快，不做缓存：弹窗先展示列表里的现有信息，
+  /// 打开后由 [_FileInfoSheet] 拉取最新简介与所在分页的最新条目渐入更新。
+  Future<void> _showFileProperties(LzFile file) async {
+    if (_selecting) {
+      _toggleFileSelection(file.id);
+      return;
+    }
+    // 与文件夹属性等弹窗保持一致：统一使用 showAppSheet（内容自适应高度 +
+    // 到顶后继续下拉带走弹窗的手感）
+    await showAppSheet<void>(
+      context,
+      child: _FileInfoSheet(file: file, page: this),
+    );
+  }
+
+  /// 取文件所在分页的最新条目（下载数等字段变化快，不做缓存）。
+  ///
+  /// 只扫描已经加载的前几页；找不到或出错时返回 null，由调用方沿用现有信息。
+  Future<LzFile?> _freshFileEntry(String fileId) async {
+    final client = _activeClient();
+    if (client == null) return null;
+    final maxPage = math.max(1, math.min(_page, 3));
+    for (var page = 1; page <= maxPage; page++) {
+      try {
+        final result = await client.listFilesPage(_folderId, page);
+        for (final item in result.files) {
+          if (item.id == fileId) return item;
+        }
+        if (!result.hasMore) break;
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /// 把最新条目合并回当前列表（顺序不变、不播放动画），
+  /// 用于文件属性弹窗里刷新下载数等易变字段。
+  void _replaceFileEntry(LzFile fresh) {
+    if (!mounted) return;
+    setState(() {
+      _files = [for (final f in _files) f.id == fresh.id ? fresh : f];
+    });
+  }
+
+  /// 点 ⋯：MD3E 弹出菜单（属性 / 复制链接 / 访问密码 / 修改信息 / 移动 / 删除）。
+  ///
+  /// [buttonContext] 是那颗 ⋯ 按钮的 context——菜单贴它下方右对齐弹出。
+  Future<void> _fileMenu(
+    LzFile file,
+    BuildContext buttonContext, {
+    Offset? pointerPosition,
+  }) async {
+    if (_selecting) {
+      _toggleFileSelection(file.id);
+      return;
+    }
+    final Rect? anchor = m3eMenuAnchorOf(buttonContext);
+    if (anchor == null) return;
+    final l10n = context.l10n;
+    final _FileMenuAction? action = await showM3eMenu<_FileMenuAction>(
+      context: context,
+      anchor: anchor,
+      pointerPosition: pointerPosition,
+      // ⋯ 贴着右边缘：菜单右缘对齐，免得被屏幕右上角夹歪
+      alignEnd: true,
+      items: [
+        M3eMenuItem(
+          value: _FileMenuAction.properties,
+          label: l10n.properties,
+          icon: Icons.info_outline,
+        ),
+        M3eMenuItem(
+          value: _FileMenuAction.copyLink,
+          label: l10n.copyLink,
+          icon: Icons.copy,
+        ),
+        M3eMenuItem(
+          value: _FileMenuAction.password,
+          label: l10n.accessPassword,
+          icon: Icons.lock_outline,
+        ),
+        M3eMenuItem(
+          value: _FileMenuAction.editInfo,
+          label: l10n.folderInfo,
+          icon: Icons.edit,
+        ),
+        M3eMenuItem(
+          value: _FileMenuAction.move,
+          label: l10n.move,
+          icon: Icons.drive_file_move_outline,
+        ),
+        M3eMenuItem(
+          value: _FileMenuAction.delete,
+          label: l10n.delete,
+          icon: Icons.delete_outline,
+        ),
+      ],
+    );
+    if (action == null || !mounted) return;
+    switch (action) {
+      case _FileMenuAction.properties:
+        await _showFileProperties(file);
+      case _FileMenuAction.copyLink:
+        await _copyShareLink(file);
+      case _FileMenuAction.move:
+        await _moveSingleFile(file);
+      case _FileMenuAction.editInfo:
+        await _editFileInfoFromMenu(file);
+      case _FileMenuAction.password:
+        await _singleSetPasswd(file);
+      case _FileMenuAction.delete:
+        await _deleteFile(file);
+    }
+  }
+
+  /// ⋯ 菜单里的「修改信息」：列表项没有简介正文，先取一次再开弹窗——
+  /// 否则输入框是空的，用户只改名就会把简介覆盖掉。取不到就按空简介处理。
+  Future<void> _editFileInfoFromMenu(LzFile file) async {
+    final client = _activeClient();
+    var desc = '';
+    if (client != null) {
+      try {
+        desc = await client.fileDesc(file.id);
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    await _editFileInfo(file, desc: desc);
+  }
+
+  Future<void> _moveSingleFile(LzFile file) async {
+    final client = _activeClient();
+    if (client == null) return;
+    final target = await showFolderPicker(
+      context,
+      client: client,
+      excludeIds: {file.id},
+    );
+    if (target == null || !mounted) return;
+    try {
+      await client.moveFile(file.id, target.folderId);
+      // 局部刷新：被移走的条目原位淡出
+      final ok = await _refreshInPlace(refreshFolders: true);
+      if (!ok) await _reloadAfterChange();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.movedTo(1, target.name))),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.lanzouError(e))));
+    }
+  }
+
+  Future<void> _singleSetPasswd(LzFile file) async {
+    final client = _activeClient();
+    if (client == null) return;
+    // 先取当前是否启用与密码，用于预填开关和输入框
+    final navigator = Navigator.of(context);
+    showLoadingDialog(context, context.l10n.resolving);
+    String currentPwd = '';
+    try {
+      currentPwd = (await client.shareInfoOfFile(file.id)).pwd;
+    } catch (_) {
+      // 取不到就按未启用处理
+    } finally {
+      navigator.pop();
+    }
+    if (!mounted) return;
+    final result = await showPasswordDialog(
+      context,
+      enabled: currentPwd.isNotEmpty,
+      pwd: currentPwd,
+      freeTier: _accounts.store.active?.isFreeTier ?? false,
+    );
+    if (result == null || !mounted) return;
+    final pwd = result.enabled ? result.pwd : '';
+    try {
+      await client.setPasswd(file.id, pwd);
+      if (!mounted) return;
+      setState(() {
+        _files = [
+          for (final f in _files)
+            f.id == file.id
+                ? LzFile(
+                    id: f.id,
+                    name: f.name,
+                    time: f.time,
+                    size: f.size,
+                    downs: f.downs,
+                    hasPwd: pwd.isNotEmpty,
+                    hasDes: f.hasDes,
+                  )
+                : f,
+        ];
+      });
+      _pulseItems(fileIds: {file.id});
+      _updateCacheSnapshot();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            pwd.isEmpty
+                ? context.l10n.passwordCleared
+                : context.l10n.passwordSet,
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.lanzouError(e))));
+    }
+  }
+
+  /// 文件夹改名 / 简介 / 密码变化后同步到列表、路径与缓存。
+  void _applyFolderUpdate(
+    String folderId, {
+    String? name,
+    String? desc,
+    bool? hasPwd,
+  }) {
+    setState(() {
+      _folders = [
+        for (final folder in _folders)
+          folder.id == folderId
+              ? LzFolder(
+                  id: folder.id,
+                  name: name ?? folder.name,
+                  desc: desc ?? folder.desc,
+                  hasPwd: hasPwd ?? folder.hasPwd,
+                )
+              : folder,
+      ];
+      if (name != null) {
+        _path = [
+          for (final node in _path)
+            node.id == folderId ? PathNode(id: node.id, name: name) : node,
+        ];
+      }
+    });
+    _pulseItems(folderIds: {folderId});
+    // 缓存里也要改名，否则再进入该目录时路径栏会显示旧名称
+    if (name != null) {
+      _drive.cache.renameFolder(folderId, name);
+    }
+    _updateCacheSnapshot();
+  }
+
+  /// 文件夹访问密码：先取当前是否启用与密码，再弹开关 + 密码框。
+  Future<void> _setFolderPasswd(LzFolder folder) async {
+    final client = _activeClient();
+    if (client == null) return;
+    final navigator = Navigator.of(context);
+    showLoadingDialog(context, context.l10n.resolving);
+    var currentPwd = '';
+    try {
+      currentPwd = (await client.shareInfoOfFolder(folder.id)).pwd;
+    } catch (_) {
+      // 取不到就按未启用处理
+    } finally {
+      navigator.pop();
+    }
+    if (!mounted) return;
+    final result = await showPasswordDialog(
+      context,
+      enabled: currentPwd.isNotEmpty,
+      pwd: currentPwd,
+      // 文件夹提取码可以到 12 位（文件仍限 2-6 位）
+      maxLength: 12,
+      freeTier: _accounts.store.active?.isFreeTier ?? false,
+    );
+    if (result == null || !mounted) return;
+    final pwd = result.enabled ? result.pwd : '';
+    try {
+      await client.setFolderPasswd(folder.id, pwd);
+      if (!mounted) return;
+      _applyFolderUpdate(folder.id, hasPwd: pwd.isNotEmpty);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            pwd.isEmpty
+                ? context.l10n.passwordCleared
+                : context.l10n.passwordSet,
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.lanzouError(e))));
+    }
+  }
+
+  /// 修改文件信息（名称 + 简介），成功后返回新值给调用方刷新弹窗。
+  ///
+  /// 名称没改动时只保存简介：蓝奏云的重命名接口（task 46）只对会员开放，
+  /// 免费账号不该因为改名不可用而连简介也改不了。
+  Future<({String name, String desc})?> _editFileInfo(
+    LzFile file, {
+    required String desc,
+  }) async {
+    final client = _activeClient();
+    if (client == null) return null;
+    final freeTier = _accounts.store.active?.isFreeTier ?? false;
+    final result = await showDialog<({String name, String desc})>(
+      context: context,
+      builder: (_) => _ItemFormDialog(
+        title: context.l10n.folderInfo,
+        confirmLabel: context.l10n.confirm,
+        name: file.name,
+        desc: desc,
+        // 普通账号改不了文件名（重命名接口只对会员开放），标题里说明一下
+        nameLabel: freeTier ? context.l10n.nameLabelMember : null,
+      ),
+    );
+    if (result == null || !mounted) return null;
+    // 名称为空由弹窗自己的 error state 拦住，到这里一定非空
+    final name = result.name;
+    final newDesc = result.desc;
+    try {
+      if (name != file.name) {
+        await client.setFileName(file.id, name);
+      }
+      await client.setDesc(file.id, newDesc);
+      if (!mounted) return null;
+      setState(() {
+        _files = [
+          for (final f in _files)
+            f.id == file.id
+                ? LzFile(
+                    id: f.id,
+                    name: name,
+                    time: f.time,
+                    size: f.size,
+                    downs: f.downs,
+                    hasPwd: f.hasPwd,
+                    hasDes: true,
+                  )
+                : f,
+        ];
+      });
+      _pulseItems(fileIds: {file.id});
+      _updateCacheSnapshot();
+      if (!mounted) return null;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.itemInfoSaved)));
+      return (name: name, desc: newDesc);
+    } catch (e) {
+      if (!mounted) return null;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.lanzouError(e))));
+      return null;
+    }
+  }
+
+  /// 修改文件夹信息（名称 + 简介），成功后返回新值给调用方刷新弹窗。
+  Future<({String name, String desc})?> _editFolderInfo(LzFolder folder) async {
+    final client = _activeClient();
+    if (client == null) return null;
+    // 控制器由弹窗自己持有：退场动画期间 TextField 仍会重建，
+    // 在 showDialog 返回后立刻 dispose 会触发
+    // 「A TextEditingController was used after being disposed」。
+    final result = await showDialog<({String name, String desc})>(
+      context: context,
+      builder: (_) => _ItemFormDialog(
+        title: context.l10n.folderInfo,
+        confirmLabel: context.l10n.confirm,
+        name: folder.name,
+        desc: folder.desc,
+      ),
+    );
+    if (result == null || !mounted) return null;
+    // 名称为空由弹窗自己的 error state 拦住，到这里一定非空
+    final name = result.name;
+    final desc = result.desc;
+    try {
+      await client.setFolderInfo(folder.id, name: name, desc: desc);
+      if (!mounted) return null;
+      _applyFolderUpdate(folder.id, name: name, desc: desc);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.folderInfoSaved)));
+      return (name: name, desc: desc);
+    } catch (e) {
+      if (!mounted) return null;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.lanzouError(e))));
+      return null;
+    }
+  }
+
+  /// 点文件夹 ⋯：MD3E 弹出菜单
+  /// （打开 / 属性 / 复制链接 / 访问密码 / 修改信息 / 删除）。
+  ///
+  /// [buttonContext] 是那颗 ⋯ 按钮的 context（桌面端右键时是整行）——
+  /// 菜单贴它下方右对齐弹出。
+  Future<void> _folderMenu(
+    LzFolder folder,
+    BuildContext buttonContext, {
+    Offset? pointerPosition,
+  }) async {
+    if (_selecting) {
+      _toggleFolderSelection(folder.id);
+      return;
+    }
+    final anchor = m3eMenuAnchorOf(buttonContext);
+    if (anchor == null) return;
+    final l10n = context.l10n;
+    final _FolderMenuAction? action = await showM3eMenu<_FolderMenuAction>(
+      context: context,
+      anchor: anchor,
+      pointerPosition: pointerPosition,
+      // ⋯ 贴着右边缘：菜单右缘对齐，免得被屏幕右上角夹歪
+      alignEnd: true,
+      items: [
+        M3eMenuItem(
+          value: _FolderMenuAction.open,
+          label: l10n.open,
+          icon: Icons.open_in_new,
+        ),
+        M3eMenuItem(
+          value: _FolderMenuAction.properties,
+          label: l10n.properties,
+          icon: Icons.info_outline,
+        ),
+        M3eMenuItem(
+          value: _FolderMenuAction.copyLink,
+          label: l10n.copyLink,
+          icon: Icons.copy,
+        ),
+        M3eMenuItem(
+          value: _FolderMenuAction.password,
+          label: l10n.accessPassword,
+          icon: Icons.lock_outline,
+        ),
+        M3eMenuItem(
+          value: _FolderMenuAction.editInfo,
+          label: l10n.folderInfo,
+          icon: Icons.edit,
+        ),
+        M3eMenuItem(
+          value: _FolderMenuAction.delete,
+          label: l10n.delete,
+          icon: Icons.delete_outline,
+        ),
+      ],
+    );
+    if (action == null || !mounted) return;
+    switch (action) {
+      case _FolderMenuAction.open:
+        // 与点这个文件夹卡片一样：进目录（顺手记一条最近使用）
+        await _openFolder(folder);
+      case _FolderMenuAction.properties:
+        await _showFolderProperties(folder);
+      case _FolderMenuAction.copyLink:
+        await _copyFolderShareLink(folder);
+      case _FolderMenuAction.password:
+        await _setFolderPasswd(folder);
+      case _FolderMenuAction.editInfo:
+        await _editFolderInfoFromMenu(folder);
+      case _FolderMenuAction.delete:
+        await _deleteFolder(folder);
+    }
+  }
+
+  /// ⋯ 菜单 / 顶栏「目录属性」进入的文件夹属性弹窗。
+  ///
+  /// 从 ⋯ 菜单进来时说的就是这个文件夹本身，不用再给一个「打开」。
+  Future<void> _showFolderProperties(LzFolder folder) async {
+    await showAppSheet<void>(
+      context,
+      child: _FolderInfoSheet(folder: folder, page: this),
+    );
+  }
+
+  /// ⋯ 菜单里的「修改信息」：列表项带的简介可能是截断过的，先取一次最新全文
+  /// （与文件的修改信息同一个口径），取不到就沿用列表里的值。
+  Future<void> _editFolderInfoFromMenu(LzFolder folder) async {
+    final client = _activeClient();
+    var desc = folder.desc;
+    if (client != null) {
+      try {
+        final info = await client.shareInfoOfFolder(folder.id);
+        if (info.desc.isNotEmpty) desc = info.desc;
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    await _editFolderInfo(
+      LzFolder(
+        id: folder.id,
+        name: folder.name,
+        desc: desc,
+        hasPwd: folder.hasPwd,
+      ),
+    );
+  }
+
+  /// 下载自己网盘里的文件（先换分享信息，再解析直链入队）。
+  ///
+  /// [share] 由属性弹窗传入：打开弹窗时为了收藏判定已经取过分享信息，
+  /// 直接复用可以省掉 2 个请求。
+  /// 解析分享信息 + 直链并入队。返回值给属性弹窗用：false = 没入队
+  /// （解析失败 / 未登录），调用方据此把「解析中」状态恢复原状。
+  Future<bool> _downloadOwnFile(LzFile file, {ShareInfo? share}) async {
+    final transfers = _transfers;
+    final client = _activeClient();
+    if (client == null) return false;
+    final publicClient = ref.read(lanzouClientRegistryProvider).publicClient;
+    final accountUid = _accounts.store.activeUid ?? '';
+    try {
+      final info = share ?? await client.shareInfoOfFile(file.id);
+      if (!mounted) return false;
+      final direct = await publicClient.resolveFileShare(
+        info.url,
+        pwd: info.pwd,
+      );
+      transfers.addDownload(
+        url: direct.url,
+        name: direct.name.isEmpty ? file.name : direct.name,
+        referer: info.url,
+        pwd: info.pwd,
+        via: publicClient,
+        refId: '$accountUid:${file.id}',
+      );
+      if (!mounted) return true;
+      // 属性弹窗不再关闭：反馈要走盖在弹窗之上的轻提示
+      showAppToast(context, context.l10n.addedToQueue);
+      return true;
+    } catch (e) {
+      if (!mounted) return false;
+      showAppToast(context, context.l10n.lanzouError(e));
+      return false;
+    }
+  }
+
+  Future<void> _copyShareLink(LzFile file, {ShareInfo? share}) async {
+    final client = _activeClient();
+    if (client == null) return;
+    try {
+      final info = share ?? await client.shareInfoOfFile(file.id);
+      if (!mounted) return;
+      await copyText(
+        context,
+        info.pwd.isEmpty
+            ? info.url
+            : context.l10n.linkWithPassword(info.url, info.pwd),
+        asToast: true,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      showAppToast(context, context.l10n.lanzouError(e));
+    }
+  }
+
+  Future<void> _copyFolderShareLink(LzFolder folder, {ShareInfo? share}) async {
+    final client = _activeClient();
+    if (client == null) return;
+    try {
+      final info = share ?? await client.shareInfoOfFolder(folder.id);
+      if (!mounted) return;
+      await copyText(
+        context,
+        info.pwd.isEmpty
+            ? info.url
+            : context.l10n.linkWithPassword(info.url, info.pwd),
+        asToast: true,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      showAppToast(context, context.l10n.lanzouError(e));
+    }
+  }
+
+  /// 解析文件的下载直链（与 [_downloadOwnFile] 同一套：先取分享信息，
+  /// 再换出可直连下载的地址）。
+  Future<String?> _resolveFileDirectLink(
+    LzFile file, {
+    ShareInfo? share,
+  }) async {
+    final client = _activeClient();
+    if (client == null) return null;
+    final publicClient = ref.read(lanzouClientRegistryProvider).publicClient;
+    final info = share ?? await client.shareInfoOfFile(file.id);
+    final direct = await publicClient.resolveFileShare(info.url, pwd: info.pwd);
+    return direct.url;
+  }
+
+  /// 复制下载直链。
+  Future<void> _copyDirectLink(LzFile file, {ShareInfo? share}) async {
+    // 直链要现解析（分享信息 + 直链两次请求）：给个「解析中…」等待弹窗，
+    // 和设置访问密码同一个样式
+    final navigator = Navigator.of(context);
+    showLoadingDialog(context, context.l10n.resolving);
+    String? url;
+    try {
+      url = await _resolveFileDirectLink(file, share: share);
+    } catch (e) {
+      if (mounted) showAppToast(context, context.l10n.lanzouError(e));
+    } finally {
+      navigator.pop();
+    }
+    if (!mounted || url == null) return;
+    await copyText(context, url, asToast: true);
+  }
+
+  /// 用二维码显示下载直链。
+  Future<void> _showDirectLinkQr(LzFile file, {ShareInfo? share}) async {
+    // 同上：解析期间先转圈
+    final navigator = Navigator.of(context);
+    showLoadingDialog(context, context.l10n.resolving);
+    String? url;
+    try {
+      url = await _resolveFileDirectLink(file, share: share);
+    } catch (e) {
+      if (mounted) showAppToast(context, context.l10n.lanzouError(e));
+    } finally {
+      navigator.pop();
+    }
+    if (!mounted || url == null) return;
+    await _showQr(file.name, url, '');
+  }
+
+  /// 取消收藏（收藏表按分享链接去重，所以要先取回分享信息）。
+  ///
+  /// 返回是否成功：调用方（属性弹窗）要按结果回滚按钮的选中态。
+  Future<bool> _unfavoriteFile(LzFile file) async {
+    final client = _activeClient();
+    if (client == null) return false;
+    try {
+      final info = await client.shareInfoOfFile(file.id);
+      await _db.removeFavorite(info.url);
+      if (!mounted) return false;
+      showAppToast(context, context.l10n.unfavorited);
+      return true;
+    } catch (e) {
+      if (!mounted) return false;
+      showAppToast(context, context.l10n.lanzouError(e));
+      return false;
+    }
+  }
+
+  /// 取消收藏文件夹。
+  Future<bool> _unfavoriteFolder(LzFolder folder) async {
+    final client = _activeClient();
+    if (client == null) return false;
+    try {
+      final info = await client.shareInfoOfFolder(folder.id);
+      await _db.removeFavorite(info.url);
+      if (!mounted) return false;
+      showAppToast(context, context.l10n.unfavorited);
+      return true;
+    } catch (e) {
+      if (!mounted) return false;
+      showAppToast(context, context.l10n.lanzouError(e));
+      return false;
+    }
+  }
+
+  /// 收藏文件。返回是否成功，供属性弹窗按结果回滚选中态。
+  Future<bool> _favoriteFile(LzFile file) async {
+    final client = _activeClient();
+    if (client == null) return false;
+    try {
+      final info = await client.shareInfoOfFile(file.id);
+      await _db.addFavorite(
+        kind: 'shareFile',
+        name: file.name,
+        ref: info.url,
+        pwd: info.pwd,
+        size: file.size,
+        sharer: _accounts.store.active?.nickname ?? '',
+      );
+      if (!mounted) return false;
+      showAppToast(context, context.l10n.favorited);
+      return true;
+    } catch (e) {
+      if (!mounted) return false;
+      showAppToast(context, context.l10n.lanzouError(e));
+      return false;
+    }
+  }
+
+  /// 收藏文件夹。返回是否成功，供属性弹窗按结果回滚选中态。
+  Future<bool> _favoriteFolder(LzFolder folder) async {
+    final client = _activeClient();
+    if (client == null) return false;
+    try {
+      final info = await client.shareInfoOfFolder(folder.id);
+      await _db.addFavorite(
+        kind: 'shareFolder',
+        name: folder.name,
+        ref: info.url,
+        pwd: info.pwd,
+        sharer: _accounts.store.active?.nickname ?? '',
+      );
+      if (!mounted) return false;
+      showAppToast(context, context.l10n.favorited);
+      return true;
+    } catch (e) {
+      if (!mounted) return false;
+      showAppToast(context, context.l10n.lanzouError(e));
+      return false;
+    }
+  }
+
+  Future<void> _deleteFile(LzFile file) async {
+    final l10n = context.l10n;
+    if (!await _confirmDelete(l10n.deleteConfirmSingle(file.name))) return;
+    if (!mounted) return;
+    final client = _activeClient();
+    if (client == null) return;
+    try {
+      await client.deleteItem(id: file.id, isFile: true);
+      if (!mounted) return;
+      await _removeItemsWithAnimation(fileIds: {file.id});
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.lanzouError(e))));
+    }
+  }
+
+  Future<void> _deleteFolder(LzFolder folder) async {
+    final l10n = context.l10n;
+    if (!await _confirmDelete(l10n.deleteConfirmSingle(folder.name))) return;
+    if (!mounted) return;
+    final client = _activeClient();
+    if (client == null) return;
+    // 删的是当前所在目录：删除成功后这个目录已经不存在了，要退回上一级
+    final deletingCurrent = folder.id == _folderId;
+    try {
+      await client.deleteItem(id: folder.id, isFile: false);
+      if (!mounted) return;
+      // 删除的目录如果固定在快速访问里，一并移除
+      await _db.removePin(folder.id);
+      if (deletingCurrent) {
+        // 不清缓存的话，退回父目录会读到仍包含这一项的旧快照
+        _drive.cache.clear();
+        await _jumpTo(_path.length - 2);
+        return;
+      }
+      await _removeItemsWithAnimation(folderIds: {folder.id});
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.lanzouError(e))));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    // 发布当前目录：拖拽文件落下来时的确认条要显示"上传到 根目录/abc"
+    _drive.location.value = DriveLocation(
+      id: _folderId,
+      path: [for (final node in _path) node.name].join('/'),
+    );
+
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        _selAnim,
+        _exitAnim,
+        _cacheSettings.revision,
+        _appearance.revision,
+      ]),
+      builder: (context, _) {
+        final viewSettings = (
+          gridView: _cacheSettings.gridView,
+          floatingNavBar: _appearance.floatingNavBar,
+          hideTopBar: _appearance.hideTopBar,
+          hideBottomBar: _appearance.hideBottomBar,
+        );
+        final grid = viewSettings.gridView;
+        final selectedCount = _selectedFiles.length + _selectedFolders.length;
+        final headerHeight =
+            MediaQuery.paddingOf(context).top + kToolbarHeight + 46;
+        // 底部被占住的高度（外壳底栏 / 系统导航栏），用来把 FAB 抬到它上面。
+        // 必须在页面上下文里读：FAB 槽位的 MediaQuery 已经把底部内边距清掉了。
+        final bottomObstruction = bottomObstructionHeight(context);
+        // 悬浮胶囊只在外壳里有；独立页面按系统导航栏避让即可。
+        final floatingNavInShell =
+            inRootShell(context) && viewSettings.floatingNavBar;
+        return Scaffold(
+          // 大屏外壳里的页面：背景交给外壳的圆角卡片
+          backgroundColor: transparentPageBackground(context)
+              ? Colors.transparent
+              : null,
+          // 键盘弹出时不压缩页面：搜索框在顶栏，页面由外层底栏 Scaffold
+          // 压到键盘上沿即可（FAB 的留白见 floatingActionButton）
+          resizeToAvoidBottomInset: false,
+          body: Stack(
+            children: [
+              // 小屏：正文区整体让开左右挖孔 / 侧边导航栏；顶栏（浮层）保持原样
+              BodySideInset(child: _buildBody(grid, viewSettings.hideTopBar)),
+              // 顶栏浮层：与底栏共用收起进度，切换视图时会下滑出现
+              Positioned(
+                left: 0,
+                right: 0,
+                top: 0,
+                child: TopBarOverlay(
+                  height: headerHeight,
+                  background: topBarBackgroundColor(
+                    context,
+                    Theme.of(context).colorScheme,
+                  ),
+                  // 显式高度：带 bottom（路径栏）的 AppBar 需要有限高度约束
+                  builder: (context) =>
+                      SizedBox(height: headerHeight, child: _topBar(context)),
+                ),
+              ),
+              // 多选时只覆盖顶栏；路径栏保持可见，平时透明且不拦截点击
+              Positioned(
+                left: 0,
+                right: 0,
+                top: 0,
+                child: IgnorePointer(
+                  ignoring: !_selecting,
+                  child: Opacity(
+                    opacity: _selAnim.value,
+                    child: Material(
+                      elevation: 0,
+                      // 与顶栏同一底色：小屏跟随滚动渐变色，大屏（侧栏布局）
+                      // 固定 surfaceContainer，多选条不会和 AppBar 出现色差
+                      color: topBarBackgroundColor(
+                        context,
+                        Theme.of(context).colorScheme,
+                      ),
+                      // 显式高度：Stack 的 Positioned 不提供高度约束
+                      child: SizedBox(
+                        height:
+                            MediaQuery.paddingOf(context).top + kToolbarHeight,
+                        child: _selectionAppBar(selectedCount),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: IgnorePointer(
+                  ignoring: !_selecting,
+                  child: AnimatedOpacity(
+                    opacity: _selecting ? 1 : 0,
+                    duration: _anim,
+                    curve: Curves.easeInOut,
+                    child: BatchActionBar(
+                      children: [
+                        BatchAction(
+                          icon: Icons.delete_outline,
+                          label: context.l10n.delete,
+                          onPressed: selectedCount == 0
+                              ? null
+                              : _deleteSelected,
+                        ),
+                        BatchAction(
+                          icon: Icons.download_outlined,
+                          label: context.l10n.download,
+                          onPressed: _selectedFiles.isEmpty
+                              ? null
+                              : _batchDownload,
+                        ),
+                        BatchAction(
+                          icon: Icons.copy,
+                          label: context.l10n.copyLink,
+                          onPressed: selectedCount == 0
+                              ? null
+                              : _batchCopyLinks,
+                        ),
+                        BatchAction(
+                          icon: Icons.star_outline,
+                          label: context.l10n.favorite,
+                          onPressed: selectedCount == 0 ? null : _batchFavorite,
+                        ),
+                        BatchAction(
+                          icon: Icons.more_horiz,
+                          label: context.l10n.more,
+                          onPressed: selectedCount == 0 ? null : _batchMore,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          floatingActionButton: ValueListenableBuilder<double>(
+            valueListenable: _navigation.barsHide,
+            builder: (context, hide, child) {
+              // 只跟随“底栏收起”设置：底栏跟随滚动时 FAB 也同步下滑，
+              // 多选等程序化隐藏则用补间动画，方向统一为上滑显示、下滑消失。
+              final follow = viewSettings.hideBottomBar
+                  ? hide.clamp(0.0, 1.0)
+                  : 0.0;
+              return ValueListenableBuilder<bool>(
+                valueListenable: _keyboardUp,
+                builder: (context, keyboardUp, _) {
+                  // 悬浮底栏留白：键盘弹出时底栏沉在键盘下方、屏幕上看不见，
+                  // 此时页面已被外层 Scaffold 压到键盘上沿，FAB 停在键盘上方即可，
+                  // 不能再叠加底栏高度，否则会高出约一个底栏的距离。
+                  // 普通底栏同理：外壳开了 extendBody 后，FAB 按系统手势区
+                  // 算出来的位置会落到底栏下面，这里按底栏总高度把它抬回去。
+                  // 悬浮样式的胶囊自带上下留白（16 / 12），减 20 后落在胶囊上沿之上。
+                  final lift = keyboardUp
+                      ? 0.0
+                      : math.max(
+                          0.0,
+                          floatingNavInShell
+                              ? bottomObstruction - 20.0
+                              : bottomObstruction,
+                        );
+                  return AnimatedPadding(
+                    padding: EdgeInsets.only(bottom: lift),
+                    duration: _anim,
+                    curve: Curves.easeOutCubic,
+                    child: TweenAnimationBuilder<double>(
+                      tween: Tween(begin: 0, end: _selecting ? 1.0 : 0.0),
+                      duration: _anim,
+                      curve: Curves.easeOutCubic,
+                      builder: (context, selecting, child) {
+                        // 搜索展开键盘时直接收起：FAB 浮到键盘上方没什么用，
+                        // 还会挡住列表内容
+                        final t = math.max(
+                          math.max(selecting, follow),
+                          keyboardUp ? 1.0 : 0.0,
+                        );
+                        return IgnorePointer(
+                          ignoring: t > 0.85,
+                          child: Opacity(
+                            opacity: (1 - t).clamp(0.0, 1.0),
+                            child: Transform.translate(
+                              offset: Offset(0, 150 * t),
+                              child: child,
+                            ),
+                          ),
+                        );
+                      },
+                      child: FloatingActionButton.extended(
+                        onPressed: _showAddMenu,
+                        icon: const Icon(Icons.add),
+                        label: Text(context.l10n.add),
+                      ),
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  /// 顶栏（含路径栏）：作为浮层显示，与底栏共用收起进度。
+  Widget _topBar(BuildContext context) {
+    // 点顶栏空白处回到列表顶部（子级按钮 / 路径胶囊自行响应，不会误触）
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: _scrollToTop,
+      child: AppBar(
+        backgroundColor: Colors.transparent,
+        scrolledUnderElevation: 0,
+        // 搜索时关闭按钮放左侧（与收藏页一致），否则是返回按钮
+        leading: _searching
+            ? IconButton(
+                tooltip: context.l10n.closeSearch,
+                icon: const Icon(Icons.close),
+                onPressed: _closeSearch,
+              )
+            : ((ModalRoute.of(context)?.isFirst ?? true)
+                  ? null
+                  : const AppBarBackButton()),
+        // 标题 ↔ 搜索框带显示 / 隐藏动画，不要直接闪出来
+        title: AppBarSearchSwitcher(
+          searching: _searching,
+          title: Text(context.l10n.tabDrive),
+          searchField: TextField(
+            controller: _searchController,
+            autofocus: true,
+            decoration: InputDecoration(
+              hintText: context.l10n.searchCurrentFolder,
+              border: InputBorder.none,
+            ),
+            onChanged: (value) => setState(() => _filter = value.trim()),
+          ),
+        ),
+        actions: _searching
+            ? const <Widget>[]
+            : [
+                IconButton(
+                  tooltip: context.l10n.search,
+                  icon: const Icon(Icons.search),
+                  onPressed: () => setState(() => _searching = true),
+                ),
+                IconButton(
+                  tooltip: context.l10n.menu,
+                  icon: const Icon(Icons.more_vert),
+                  onPressed: _showDriveMenu,
+                ),
+              ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(kDrivePathBarHeight),
+          // 多选期间禁用路径切换，但路径栏保持可见；
+          // bottom 拿到的是无界高度，必须自己声明固定高度，否则会把工具栏挤成 0
+          child: SizedBox(
+            height: 46,
+            child: IgnorePointer(ignoring: _selecting, child: _pathBar()),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 顶栏不参与列表布局，列表顶部留出等高占位。
+  Widget _buildBody(bool grid, bool hideTopBar) {
+    final headerInset =
+        MediaQuery.of(context).padding.top + kToolbarHeight + 46;
+    return ScrollTint(
+      hideDistance: headerInset,
+      readBarsHidden: () => _navigation.topBarHide.value,
+      onBarsHidden: hideTopBar ? _navigation.setTopBarHideFromScroll : null,
+      // 列表快速滑动条（可拖拽）
+      child: FastScrollbar(
+        controller: _scroll,
+        // 顶栏 + 路径栏是浮层：滑块从它们下方开始，底部让开底栏 / FAB 区域
+        padding: EdgeInsets.only(
+          top: headerInset,
+          bottom: shellBottomBarInset(context),
+        ),
+        // MD3E 下拉刷新（overlay 版）：内容位移仍归滚动 physics（iOS 橡皮筋
+        // 原样保留），指示器固定在上边缘、只读滚动通知算进度，两者互不叠加，
+        // 所以不会再出现「小球 + 一层回弹留白」。
+        child: M3ePullToRefresh(
+          onRefresh: _reloadAfterChange,
+          // 页面自己在加载（居中转圈）时不响应下拉刷新，避免两个指示同时出现
+          enabled: !_loading,
+          // 顶栏 / 路径栏是浮层：指示器从它们下缘下方留一点空出现
+          // （overlay 不参与列表布局，不会顶列表）。
+          edgeOffset: headerInset + 16,
+          // 小球在拖动过程中的滑动行程：128 比默认 70 长，拉的时候能跟着走一段，
+          // 不会一露头就停住。
+          indicatorHeight: 128,
+          semanticsLabel: MaterialLocalizations.of(context)
+              .refreshIndicatorSemanticLabel,
+          // 列表尺寸一变化（进页面、补页、窗口大小变化）就重新评估要不要补页：
+          // 这条触发不依赖「下一帧还会不会有帧」，界面静止时也能自己补齐，
+          // 否则内容不满一屏时「已经到底了」要等用户滑一下才出现。
+          child: NotificationListener<ScrollMetricsNotification>(
+            onNotification: (notification) {
+              if (notification.metrics.hasContentDimensions) {
+                _fillViewportIfNeeded();
+              }
+              return false;
+            },
+            child: CustomScrollView(
+              controller: _scroll,
+              slivers: [
+                // 顶栏 / 路径栏是浮层：列表顶部留出等高占位，内容不从它下面穿过。
+                // （下拉刷新的 overlay 只是浮在上面，不替列表让位。）
+                SliverToBoxAdapter(child: SizedBox(height: headerInset)),
+                // 目录切换时内容整体淡出（顶栏与路径栏不受影响）
+                ..._contentSlivers(grid).map(
+                  (sliver) => SliverFadeTransition(
+                    opacity: _contentFade,
+                    sliver: sliver,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _pathBar() {
+    return PathBar(
+      segments: [
+        PathSegment(id: '-1', label: context.l10n.root),
+        for (final node in _path) PathSegment(id: node.id, label: node.name),
+      ],
+      // 点当前目录 = 刷新；点上一级 = 返回该目录
+      onTap: (index) =>
+          index == _path.length ? _reloadAfterChange() : _jumpTo(index - 1),
+      verticalPadding: 8,
+    );
+  }
+
+  /// 顶栏与路径栏之外的剩余 slivers，按加载状态切换。
+  List<Widget> _contentSlivers(bool grid) {
+    // 底栏盖在正文上方（extendBody）时，各种占满高度的空状态
+    // 要靠这份留白保持在可见区域居中，而不是被底栏压住。
+    final cover = shellBottomBarInset(context);
+    if (_loading) {
+      return [
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: Padding(
+            padding: EdgeInsets.only(bottom: cover),
+            child: const Center(child: M3eLoadingIndicator()),
+          ),
+        ),
+      ];
+    }
+    if (_error != null) {
+      return [
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: Padding(
+            padding: EdgeInsets.only(bottom: cover),
+            child: FadeIn(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.cloud_off,
+                        size: 40,
+                        color: Theme.of(context).colorScheme.outline,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        context.l10n.loadFailed(_error!),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 12),
+                      FilledButton(
+                        onPressed: () => _load(force: true),
+                        child: Text(context.l10n.retry),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ];
+    }
+    final folders = _visibleFolders;
+    final files = _visibleFiles;
+    if (folders.isEmpty && files.isEmpty && !_loadingMore) {
+      return [
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: Padding(
+            padding: EdgeInsets.only(bottom: cover),
+            child: _EmptyFolderView(filter: _filter),
+          ),
+        ),
+      ];
+    }
+    final showFolders = _filter.isEmpty || folders.isNotEmpty;
+    final animate = _animationsEnabled;
+    // 列表模式：首行顶部留白与左右内边距一致（12dp）；
+    // 行自带 12dp 横向内边距，列间距靠它即可，纵向沿用原来的 3+3
+    const listTopPadding = EdgeInsets.only(top: 12);
+    final filesTopPadding = showFolders && folders.isNotEmpty
+        ? EdgeInsets.zero
+        : listTopPadding;
+    return [
+      if (showFolders && folders.isNotEmpty)
+        if (grid)
+          SliverPadding(
+            // 网格视图：顶部留白与左右一致（12dp）
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+            sliver: SliverGrid.builder(
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 150,
+                mainAxisSpacing: 8,
+                crossAxisSpacing: 8,
+                childAspectRatio: 0.86,
+              ),
+              itemCount: folders.length,
+              itemBuilder: (context, index) => _folderItem(
+                folders[index],
+                index,
+                itemCount: _enterFolderCount,
+                grid: true,
+                animate: animate,
+              ),
+            ),
+          )
+        else
+          SliverPadding(
+            padding: listTopPadding,
+            // 列表模式保持单列：多栏浏览由显式网格模式承担，避免用户选了
+            // 列表却在大窗口里被自动改成三列按钮卡片。
+            sliver: SliverList.builder(
+              itemCount: folders.length,
+              itemBuilder: (context, index) => _folderItem(
+                folders[index],
+                index,
+                itemCount: _enterFolderCount,
+                grid: false,
+                animate: animate,
+              ),
+            ),
+          ),
+      if (files.isNotEmpty)
+        if (grid)
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+            sliver: SliverGrid.builder(
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 150,
+                mainAxisSpacing: 8,
+                crossAxisSpacing: 8,
+                childAspectRatio: 0.86,
+              ),
+              itemCount: files.length,
+              itemBuilder: (context, index) => _fileItem(
+                files[index],
+                index,
+                itemCount: _enterFileCount,
+                grid: true,
+                animate: animate,
+              ),
+            ),
+          )
+        else
+          SliverPadding(
+            padding: filesTopPadding,
+            sliver: SliverList.builder(
+              itemCount: files.length,
+              itemBuilder: (context, index) => _fileItem(
+                files[index],
+                index,
+                itemCount: _enterFileCount,
+                grid: false,
+                animate: animate,
+              ),
+            ),
+          ),
+      SliverToBoxAdapter(
+        child: Padding(
+          // 底栏让位统一由 shellBottomBarInset 负责；这里额外给悬浮的
+          // 「添加」FAB 让位（FAB 高 56、距底栏上沿 16），
+          // 否则滚到底时最后一行会被它压住
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 72),
+          child: Center(
+            // 失败后的自动重试还在排队时继续显示转圈：马上会再试一次，
+            // 闪一下「重试」反而像是让用户去点
+            child:
+                (_loadingMore ||
+                    (_loadFailed && _hasMore && _autoRetriesLeft > 0))
+                ? const M3eCircularProgressIndicator(size: 24, strokeWidth: 3)
+                // 还有下一页但拉取失败：给一个手动重试入口，别只留空白
+                : (_loadFailed && _hasMore
+                      ? TextButton(
+                          onPressed: () => _loadMore(),
+                          child: Text(context.l10n.retry),
+                        )
+                      : Text(
+                          _hasMore
+                              ? ''
+                              : (_filter.isEmpty
+                                    ? context.l10n.reachedEnd
+                                    : context.l10n.filterResult),
+                          style: Theme.of(context).textTheme.bodySmall,
+                        )),
+          ),
+        ),
+      ),
+      // 底栏盖在正文上方（extendBody）时，补足列表末尾留白
+      SliverToBoxAdapter(child: SizedBox(height: shellBottomBarInset(context))),
+    ];
+  }
+
+  /// 单个文件夹条目的动画包装（共享错峰控制器 + 局部刷新动画）。
+  Widget _folderItem(
+    LzFolder folder,
+    int index, {
+    required int itemCount,
+    required bool grid,
+    required bool animate,
+  }) {
+    final selected = _selectedFolders.contains(folder.id);
+    final item = _AnimatedListItem(
+      key: ValueKey('$_folderId-f-${folder.id}'),
+      index: index,
+      itemCount: itemCount,
+      enter: _enterAnim,
+      enabled: animate,
+      removing: _removingFolders.contains(folder.id),
+      appearing: _appearingFolders.contains(folder.id),
+      pulsing: _pulsingFolders.contains(folder.id),
+      collapse: !grid,
+      pulsePadding: grid
+          ? const EdgeInsets.all(4)
+          : const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+      pulseRadius: grid ? 18 : (selected ? 14 : 18),
+      child: grid
+          ? _FolderTile(
+              folder: folder,
+              selected: selected,
+              selecting: _selecting,
+              onTap: () => _openFolder(folder),
+              onMenu: (buttonContext, {pointerPosition}) => _folderMenu(
+                folder,
+                buttonContext,
+                pointerPosition: pointerPosition,
+              ),
+              onLongPress: () => _enterSelection(folderId: folder.id),
+            )
+          : _FolderRow(
+              folder: folder,
+              selected: selected,
+              selecting: _selecting,
+              onTap: () => _openFolder(folder),
+              onMenu: (buttonContext, {pointerPosition}) => _folderMenu(
+                folder,
+                buttonContext,
+                pointerPosition: pointerPosition,
+              ),
+              onLongPress: () => _enterSelection(folderId: folder.id),
+            ),
+    );
+    // 无障碍：多选「已选中」状态告诉读屏（只换了图标读屏看不出来）；
+    // 只在选中时标注，普通浏览时不额外读「未选中」。
+    // 网格卡片自己在卡片内标注（见 [_FolderTile]）：包在卡片外会另生成一颗
+    // 没有 label 的独立节点，TalkBack 聚焦的是可点节点，就读不到「已选中」了。
+    return selected && !grid ? Semantics(selected: true, child: item) : item;
+  }
+
+  /// 单个文件条目的动画包装。
+  Widget _fileItem(
+    LzFile file,
+    int index, {
+    required int itemCount,
+    required bool grid,
+    required bool animate,
+  }) {
+    final selected = _selectedFiles.contains(file.id);
+    final downloadKey = driveDownloadKey(
+      _accounts.store.activeUid ?? '',
+      file.id,
+    );
+    final item = _AnimatedListItem(
+      key: ValueKey('$_folderId-l-${file.id}'),
+      index: index,
+      itemCount: itemCount,
+      enter: _enterAnim,
+      enabled: animate,
+      removing: _removingFiles.contains(file.id),
+      appearing: _appearingFiles.contains(file.id),
+      pulsing: _pulsingFiles.contains(file.id),
+      collapse: !grid,
+      pulsePadding: grid
+          ? const EdgeInsets.all(4)
+          : const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+      pulseRadius: grid ? 18 : (selected ? 14 : 18),
+      child: grid
+          ? _FileTile(
+              file: file,
+              downloadKey: downloadKey,
+              selected: selected,
+              selecting: _selecting,
+              onTap: () => _fileActions(file),
+              onMenu: (buttonContext, {pointerPosition}) => _fileMenu(
+                file,
+                buttonContext,
+                pointerPosition: pointerPosition,
+              ),
+              onLongPress: () => _enterSelection(fileId: file.id),
+            )
+          : _FileRow(
+              file: file,
+              downloadKey: downloadKey,
+              selected: selected,
+              selecting: _selecting,
+              onTap: () => _fileActions(file),
+              onMenu: (buttonContext, {pointerPosition}) => _fileMenu(
+                file,
+                buttonContext,
+                pointerPosition: pointerPosition,
+              ),
+              onLongPress: () => _enterSelection(fileId: file.id),
+            ),
+    );
+    // 同上：网格卡片自己在卡片内标注（见 [_FileTile]）
+    return selected && !grid ? Semantics(selected: true, child: item) : item;
+  }
+}
+
+/// 列表项动画：
+/// - [enter] 目录加载后的错峰出现（整张列表共享一个控制器，
+///   滑到新构建的条目时只会读到当前进度，不会重播动画）；
+/// - [appearing] 局部刷新新增条目的淡入；
+/// - [removing] 移除前的淡出（列表模式同时收起高度，条目平滑收拢）；
+/// - [pulsing] 修改描述/密码后的高亮闪烁。
+class _AnimatedListItem extends StatelessWidget {
+  const _AnimatedListItem({
+    super.key,
+    required this.index,
+    required this.itemCount,
+    required this.enter,
+    required this.enabled,
+    required this.child,
+    this.appearing = false,
+    this.removing = false,
+    this.pulsing = false,
+    this.collapse = false,
+    this.pulsePadding = EdgeInsets.zero,
+    this.pulseRadius = 18,
+  });
+
+  final int index;
+  final int itemCount;
+
+  /// 目录进入动画的共享进度（0..1，动画结束后为 1）。
+  final Animation<double> enter;
+  final bool enabled;
+  final Widget child;
+  final bool appearing;
+  final bool removing;
+  final bool pulsing;
+  final bool collapse;
+
+  /// 与条目真实 Material / Card 可点区域一致的高亮内缩。
+  final EdgeInsetsGeometry pulsePadding;
+
+  /// 与条目正在使用的 Material 外形一致。
+  final double pulseRadius;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!enabled) return child;
+    // 系统要求少动效：出现 / 消失 / 高亮都直接到位，不做淡入淡出
+    if (reduceMotionOf(context)) return child;
+    var item = child;
+
+    if (removing) {
+      item = TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0, end: 1),
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeInCubic,
+        builder: (context, t, child) {
+          final faded = Opacity(
+            opacity: (1 - t).clamp(0.0, 1.0),
+            child: Transform.scale(scale: 1 - 0.06 * t, child: child),
+          );
+          if (!collapse) return faded;
+          return Align(
+            heightFactor: (1 - t).clamp(0.0, 1.0),
+            alignment: Alignment.topCenter,
+            child: faded,
+          );
+        },
+        child: item,
+      );
+    } else if (appearing) {
+      item = TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0, end: 1),
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic,
+        builder: (context, t, child) => Opacity(
+          opacity: t,
+          child: Transform.scale(scale: 0.94 + 0.06 * t, child: child),
+        ),
+        child: item,
+      );
+    }
+
+    if (pulsing) {
+      final scheme = Theme.of(context).colorScheme;
+      item = TweenAnimationBuilder<double>(
+        tween: Tween(begin: 1, end: 0),
+        duration: const Duration(milliseconds: 700),
+        curve: Curves.easeOut,
+        builder: (context, t, child) => Stack(
+          children: [
+            child!,
+            Positioned.fill(
+              child: IgnorePointer(
+                child: Padding(
+                  padding: pulsePadding,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: scheme.primary.withValues(alpha: 0.16 * t),
+                      borderRadius: BorderRadius.circular(pulseRadius),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        child: item,
+      );
+    }
+
+    if (removing || appearing) return item;
+    // 共享错峰出现：动画结束后进度恒为 1，之后滑动出来的条目直接显示。
+    return AnimatedBuilder(
+      animation: enter,
+      child: item,
+      builder: (context, child) {
+        final count = math.max(1, itemCount);
+        final step = math.min(
+          _driveEnterStepMs,
+          (_driveEnterDurationMs - _driveEnterItemDurationMs) /
+              math.max(1, count - 1),
+        );
+        final delay = index.clamp(0, count - 1) * step;
+        final progress =
+            ((enter.value * _driveEnterDurationMs - delay) /
+                    _driveEnterItemDurationMs)
+                .clamp(0.0, 1.0);
+        final t = Curves.easeOutCubic.transform(progress);
+        return Opacity(
+          opacity: t,
+          child: Transform.translate(
+            offset: Offset(0, 10 * (1 - t)),
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 空目录 / 无匹配结果：整块居中显示并带显隐渐变。
+class _EmptyFolderView extends StatelessWidget {
+  const _EmptyFolderView({required this.filter});
+
+  final String filter;
+
+  @override
+  Widget build(BuildContext context) {
+    return EmptyHint(
+      icon: Icons.folder_open,
+      text: filter.isEmpty
+          ? context.l10n.emptyFolder
+          : context.l10n.noMatchContent(filter),
+    );
+  }
+}
+
+/// 一次目录拉取的结果。
+class _Listing {
+  const _Listing({
+    required this.folders,
+    required this.files,
+    required this.path,
+    required this.page,
+    required this.hasMore,
+  });
+
+  final List<LzFolder> folders;
+  final List<LzFile> files;
+  final List<PathNode> path;
+  final int page;
+  final bool hasMore;
+}
+
+class _FolderTile extends StatelessWidget {
+  const _FolderTile({
+    required this.folder,
+    required this.selected,
+    required this.selecting,
+    required this.onTap,
+    required this.onMenu,
+    required this.onLongPress,
+  });
+
+  final LzFolder folder;
+  final bool selected;
+
+  /// 多选期间隐藏行内 ⋯ 菜单（和收藏 / 传输页一致），避免误触。
+  final bool selecting;
+  final VoidCallback onTap;
+
+  /// ⋯（或鼠标右键）触发；鼠标右键时额外带上全局坐标。
+  final void Function(BuildContext buttonContext, {Offset? pointerPosition})
+  onMenu;
+  final VoidCallback onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      // 与列表项（Md3ListItem）同底色
+      color: selected ? scheme.primaryContainer : scheme.surfaceContainerLow,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      // 选中态标在可点节点外层：读屏聚焦卡片本体时能听到「已选中」。
+      // 注意不能包进 InkWell 里面（内容层）：那样整张卡片的文字会并进
+      // ⋯ 按钮那颗节点，卡片本体反而成了没有 label 的节点，读屏进不去。
+      child: Semantics(
+        // 只在选中时标注：普通浏览不额外读「未选中」
+        selected: selected ? true : null,
+        child: InkWell(
+          onTap: onTap,
+          onLongPress: onLongPress,
+          // 鼠标右键 = 点 ⋯ 菜单（同一套操作；多选时和 ⋯ 一起失效）
+          onSecondaryTapUp: selecting
+              ? null
+              : (TapUpDetails details) =>
+                    onMenu(context, pointerPosition: details.globalPosition),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 4, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    IconBoxTap(
+                      onTap: iconTapFor(
+                        selected: selected,
+                        onTap: onTap,
+                        onLongPress: onLongPress,
+                      ),
+                      child: Container(
+                        width: 38,
+                        height: 38,
+                        decoration: BoxDecoration(
+                          // 与文件项同款的图标块底色（只有图标颜色不同）
+                          color: selected
+                              ? scheme.surface
+                              : scheme.surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(
+                          selected ? Icons.check_circle : Icons.folder,
+                          size: 21,
+                          color: scheme.primary,
+                        ),
+                      ),
+                    ),
+                    const Spacer(),
+                    // 多选时只隐藏不占位变化：条目高度 / 文字宽度保持一致
+                    HideKeepingSpace(
+                      hidden: selecting,
+                      child: Builder(
+                        builder: (BuildContext buttonContext) => M3eIconButton(
+                          tooltip: context.l10n.folderActions,
+                          icon: Icons.more_vert,
+                          onPressed: () => onMenu(buttonContext),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const Spacer(),
+                Text(
+                  folder.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                if (folder.hasPwd)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2),
+                    child: Icon(Icons.lock_outline, size: 14),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FileTile extends StatelessWidget {
+  const _FileTile({
+    required this.file,
+    required this.downloadKey,
+    required this.selected,
+    required this.selecting,
+    required this.onTap,
+    required this.onMenu,
+    required this.onLongPress,
+  });
+
+  final LzFile file;
+
+  /// 「已加入下载」标记的匹配键；多选期间沿用同一个 key。
+  final String downloadKey;
+
+  final bool selected;
+
+  /// 多选期间隐藏行内 ⋯ 菜单（和收藏 / 传输页一致），避免误触。
+  final bool selecting;
+  final VoidCallback onTap;
+
+  /// ⋯（或鼠标右键）触发；鼠标右键时额外带上全局坐标。
+  final void Function(BuildContext buttonContext, {Offset? pointerPosition})
+  onMenu;
+  final VoidCallback onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      // 与列表项（Md3ListItem）同底色
+      color: selected ? scheme.primaryContainer : scheme.surfaceContainerLow,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      // 选中态标在可点节点外层：读屏聚焦卡片本体时能听到「已选中」。
+      // 注意不能包进 InkWell 里面（内容层）：那样整张卡片的文字会并进
+      // ⋯ 按钮那颗节点，卡片本体反而成了没有 label 的节点，读屏进不去。
+      child: Semantics(
+        // 只在选中时标注：普通浏览不额外读「未选中」
+        selected: selected ? true : null,
+        child: InkWell(
+          onTap: onTap,
+          onLongPress: onLongPress,
+          // 鼠标右键 = 点 ⋯ 菜单（同一套操作；多选时和 ⋯ 一起失效）
+          onSecondaryTapUp: selecting
+              ? null
+              : (TapUpDetails details) =>
+                    onMenu(context, pointerPosition: details.globalPosition),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 4, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    IconBoxTap(
+                      onTap: iconTapFor(
+                        selected: selected,
+                        onTap: onTap,
+                        onLongPress: onLongPress,
+                      ),
+                      child: Container(
+                        width: 38,
+                        height: 38,
+                        decoration: BoxDecoration(
+                          color: selected
+                              ? scheme.surface
+                              : scheme.surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(
+                          selected
+                              ? Icons.check_circle
+                              : iconForFile(file.name),
+                          size: 21,
+                          color: selected
+                              ? scheme.primary
+                              : fileIconColor(
+                                  file.name,
+                                  brightness: scheme.brightness,
+                                ),
+                        ),
+                      ),
+                    ),
+                    const Spacer(),
+                    HideKeepingSpace(
+                      hidden: selecting,
+                      child: Builder(
+                        builder: (BuildContext buttonContext) => M3eIconButton(
+                          tooltip: context.l10n.fileActions,
+                          icon: Icons.more_vert,
+                          onPressed: () => onMenu(buttonContext),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const Spacer(),
+                Text(
+                  file.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                // 密码图标和大小同一行：文件名占满两行时，两者各占一行会把大小顶到
+                // 卡片边缘。图标跟着 bodySmall 的字号走（12dp），和大小文本观感一致。
+                Row(
+                  children: [
+                    // 网格状态行从标题左缘开始；与密码锁之间仍保留 4dp。
+                    DownloadMarkIcon(
+                      markKey: downloadKey,
+                      size: 12,
+                      gap: 0,
+                      trailingGap: 4,
+                    ),
+                    if (file.hasPwd) ...[
+                      const Icon(Icons.lock_outline, size: 12),
+                      const SizedBox(width: 4),
+                    ],
+                    Flexible(
+                      child: Text(
+                        prettyLzSize(file.size),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// MD3E 列表项：用留白分隔而不是分割线；图标放在圆角色块里；
+/// 选中时整行填充主色容器，圆角与图标块同步做形状过渡。
+class _DriveRow extends StatelessWidget {
+  const _DriveRow({
+    required this.icon,
+    required this.selected,
+    required this.selecting,
+    required this.title,
+    required this.subtitle,
+    required this.menuTooltip,
+    required this.onTap,
+    required this.onMenu,
+    required this.onLongPress,
+    this.downloadKey,
+    this.locked = false,
+    this.iconColor,
+  });
+
+  final IconData icon;
+  final bool selected;
+
+  /// 多选期间隐藏行内 ⋯ 菜单（和收藏 / 传输页一致），避免误触。
+  final bool selecting;
+  final String title;
+  final String subtitle;
+  final String menuTooltip;
+
+  /// 「已加入下载」标记的匹配键；文件夹没有下载任务，传 null。
+  final String? downloadKey;
+
+  final VoidCallback onTap;
+
+  /// ⋯（或鼠标右键）触发；鼠标右键时额外带上全局坐标。
+  final void Function(BuildContext buttonContext, {Offset? pointerPosition})
+  onMenu;
+  final VoidCallback onLongPress;
+
+  final bool locked;
+
+  /// 图标颜色：文件夹用主题强调色，文件按类型着色。
+  final Color? iconColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+      // 选中时圆角跟着做形状过渡（shape morph）
+      child: TweenAnimationBuilder<double>(
+        tween: Tween<double>(begin: 18, end: selected ? 14 : 18),
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        builder: (context, radius, child) => Material(
+          color: selected ? scheme.primaryContainer : Colors.transparent,
+          borderRadius: BorderRadius.circular(radius),
+          clipBehavior: Clip.antiAlias,
+          child: child,
+        ),
+        child: InkWell(
+          onTap: onTap,
+          onLongPress: onLongPress,
+          // 鼠标右键 = 点 ⋯ 菜单（同一套操作；多选时和 ⋯ 一起失效）
+          onSecondaryTapUp: selecting
+              ? null
+              : (TapUpDetails details) =>
+                    onMenu(context, pointerPosition: details.globalPosition),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 2, 8),
+            child: Row(
+              children: [
+                IconBoxTap(
+                  onTap: iconTapFor(
+                    selected: selected,
+                    onTap: onTap,
+                    onLongPress: onLongPress,
+                  ),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOutCubic,
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? scheme.surface
+                          : scheme.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(selected ? 14 : 12),
+                    ),
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 200),
+                      child: Icon(
+                        selected ? Icons.check_circle : icon,
+                        key: ValueKey(selected),
+                        size: 22,
+                        color: selected
+                            ? scheme.primary
+                            : iconColor ?? scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodyLarge,
+                      ),
+                      if (subtitle.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                if (downloadKey != null)
+                  DownloadMarkIcon(markKey: downloadKey!, size: 16),
+                if (locked)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 4),
+                    child: Icon(
+                      Icons.lock_outline,
+                      size: 16,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                HideKeepingSpace(
+                  hidden: selecting,
+                  child: Builder(
+                    builder: (BuildContext buttonContext) => M3eIconButton(
+                      tooltip: menuTooltip,
+                      icon: Icons.more_vert,
+                      onPressed: () => onMenu(buttonContext),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FolderRow extends StatelessWidget {
+  const _FolderRow({
+    required this.folder,
+    required this.selected,
+    required this.selecting,
+    required this.onTap,
+    required this.onMenu,
+    required this.onLongPress,
+  });
+
+  final LzFolder folder;
+  final bool selected;
+  final bool selecting;
+  final VoidCallback onTap;
+
+  /// ⋯（或鼠标右键）触发；鼠标右键时额外带上全局坐标。
+  final void Function(BuildContext buttonContext, {Offset? pointerPosition})
+  onMenu;
+  final VoidCallback onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    return _DriveRow(
+      icon: Icons.folder,
+      iconColor: Theme.of(context).colorScheme.primary,
+      selected: selected,
+      selecting: selecting,
+      title: folder.name,
+      subtitle: folder.desc,
+      locked: folder.hasPwd,
+      menuTooltip: context.l10n.folderActions,
+      onTap: onTap,
+      onMenu: onMenu,
+      onLongPress: onLongPress,
+    );
+  }
+}
+
+class _FileRow extends StatelessWidget {
+  const _FileRow({
+    required this.file,
+    required this.downloadKey,
+    required this.selected,
+    required this.selecting,
+    required this.onTap,
+    required this.onMenu,
+    required this.onLongPress,
+  });
+
+  final LzFile file;
+
+  /// 「已加入下载」标记的匹配键。
+  final String downloadKey;
+
+  final bool selected;
+  final bool selecting;
+  final VoidCallback onTap;
+
+  /// ⋯（或鼠标右键）触发；鼠标右键时额外带上全局坐标。
+  final void Function(BuildContext buttonContext, {Offset? pointerPosition})
+  onMenu;
+  final VoidCallback onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    return _DriveRow(
+      icon: iconForFile(file.name),
+      downloadKey: downloadKey,
+      iconColor: fileIconColor(
+        file.name,
+        brightness: Theme.of(context).colorScheme.brightness,
+      ),
+      selected: selected,
+      selecting: selecting,
+      title: file.name,
+      subtitle: [
+        prettyLzSize(file.size),
+        if (file.time.isNotEmpty) file.time,
+      ].where((e) => e.isNotEmpty).join(' · '),
+      locked: file.hasPwd,
+      menuTooltip: context.l10n.fileActions,
+      onTap: onTap,
+      onMenu: onMenu,
+      onLongPress: onLongPress,
+    );
+  }
+}
+
+/// 文件夹「名称 + 简介」弹窗：新建文件夹与修改文件夹信息共用。
+/// 输入控制器随弹窗 State 一起释放，避免弹窗退场动画期间 TextField
+/// 重建时用到已 dispose 的控制器。
+class _ItemFormDialog extends StatefulWidget {
+  const _ItemFormDialog({
+    required this.title,
+    required this.confirmLabel,
+    this.name = '',
+    this.desc = '',
+    this.nameLabel,
+  });
+
+  final String title;
+  final String confirmLabel;
+  final String name;
+  final String desc;
+
+  /// 名称输入框的标题；不传用默认的「名称」。
+  /// 免费账号改不了文件名，调用处会换成带说明的文案。
+  final String? nameLabel;
+
+  @override
+  State<_ItemFormDialog> createState() => _ItemFormDialogState();
+}
+
+class _ItemFormDialogState extends State<_ItemFormDialog> {
+  late final TextEditingController _name = TextEditingController(
+    text: widget.name,
+  );
+  late final TextEditingController _desc = TextEditingController(
+    text: widget.desc,
+  );
+
+  /// 名称为空时的 error state（MD3E：错误文本 + 尾部红色 fill 风格 Error 图标）
+  String? _nameError;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _desc.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final name = _name.text.trim();
+    if (name.isEmpty) {
+      // 不关弹窗：原地标错，让用户接着改
+      setState(() => _nameError = context.l10n.pleaseEnterName);
+      return;
+    }
+    Navigator.of(context).pop((name: name, desc: _desc.text.trim()));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return formDialog(
+      context,
+      title: Text(widget.title),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _name,
+            autofocus: true,
+            onChanged: (_) {
+              if (_nameError != null) setState(() => _nameError = null);
+            },
+            decoration: errorState(
+              context,
+              InputDecoration(
+                labelText: widget.nameLabel ?? context.l10n.nameLabel,
+              ),
+              _nameError,
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _desc,
+            // 蓝奏云的文件夹简介支持换行，输入框也要能录入多行
+            minLines: 2,
+            maxLines: 6,
+            keyboardType: TextInputType.multiline,
+            decoration: InputDecoration(labelText: context.l10n.descOptional),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(context.l10n.cancel),
+        ),
+        FilledButton(onPressed: _submit, child: Text(widget.confirmLabel)),
+      ],
+    );
+  }
+}
+
+/// 修改简介弹窗（文件 / 文件夹批量共用）：控制器随弹窗 State 释放。
+class _EditDescDialog extends StatefulWidget {
+  const _EditDescDialog();
+
+  @override
+  State<_EditDescDialog> createState() => _EditDescDialogState();
+}
+
+class _EditDescDialogState extends State<_EditDescDialog> {
+  final TextEditingController _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return formDialog(
+      context,
+      title: Text(context.l10n.editDesc),
+      content: TextField(
+        controller: _controller,
+        maxLines: 3,
+        autofocus: true,
+        decoration: InputDecoration(hintText: context.l10n.newDescHint),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(context.l10n.cancel),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text.trim()),
+          child: Text(context.l10n.confirm),
+        ),
+      ],
+    );
+  }
+}
+
+/// 新建文件夹（只填名称）弹窗：控制器随弹窗 State 释放。
+class _FolderNameDialog extends StatefulWidget {
+  const _FolderNameDialog();
+
+  @override
+  State<_FolderNameDialog> createState() => _FolderNameDialogState();
+}
+
+class _FolderNameDialogState extends State<_FolderNameDialog> {
+  final TextEditingController _controller = TextEditingController();
+
+  String? _error;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final name = _controller.text.trim();
+    if (name.isEmpty) {
+      setState(() => _error = context.l10n.pleaseEnterName);
+      return;
+    }
+    Navigator.of(context).pop(name);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return formDialog(
+      context,
+      title: Text(context.l10n.newFolder),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        onChanged: (_) {
+          if (_error != null) setState(() => _error = null);
+        },
+        decoration: errorState(
+          context,
+          InputDecoration(labelText: context.l10n.nameLabel),
+          _error,
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(context.l10n.cancel),
+        ),
+        FilledButton(onPressed: _submit, child: Text(context.l10n.create)),
+      ],
+    );
+  }
+}
+
+/// 文件属性弹窗：简介与下载数变动快，不读缓存——打开时先展示列表里的
+/// 现有信息，随后重新拉取最新简介与所在分页的最新条目渐入更新。
+class _FileInfoSheet extends ConsumerStatefulWidget {
+  const _FileInfoSheet({required this.file, required this.page});
+
+  final LzFile file;
+  final _DrivePageState page;
+
+  @override
+  ConsumerState<_FileInfoSheet> createState() => _FileInfoSheetState();
+}
+
+/// 文件属性弹窗顶部那一行常用操作（图标按钮组）。
+enum _FileQuickAction { download, link, qr, favorite, password }
+
+class _FileInfoSheetState extends ConsumerState<_FileInfoSheet> {
+  late LzFile _file = widget.file;
+
+  /// 当前名称（「修改信息」里可以改名，改完头部和后续操作都用新的）。
+  late String _name = widget.file.name;
+  String _desc = '';
+  bool _loading = true;
+
+  /// 收藏态：null = 还没查到（分享信息 + 收藏表查完才有）。
+  bool? _favorite;
+
+  /// 打开弹窗时取回的分享信息：收藏判定要用，也留给下载 / 复制链接 /
+  /// 二维码复用（它们自己再取一次要 2 个请求）。null = 还没取回来。
+  ShareInfo? _share;
+
+  /// 当前（可能已改过名称的）文件：后续动作都按这份走。
+  LzFile get _currentFile => LzFile(
+    id: _file.id,
+    name: _name,
+    time: _file.time,
+    size: _file.size,
+    downs: _file.downs,
+    hasPwd: _file.hasPwd,
+    hasDes: _file.hasDes,
+  );
+
+  /// 「复制链接 / 二维码」二选一菜单的锚点：那一行图标按钮组（菜单要贴在
+  /// 被点的那一段下面，所以要量它的位置）。
+  final GlobalKey _quickActionGroupKey = GlobalKey();
+  _FileQuickAction? _menuTarget;
+
+  /// 正在解析直链（点了下载、任务还没入队）：按钮位显示不确定态小环，
+  /// 解析失败恢复原状。
+  bool _resolvingDownload = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final client = widget.page._activeClient();
+    final db = ref.read(appDbProvider);
+    // 下载数：重新取文件所在分页的条目，命中后同步列表（找不到就沿用现值）
+    final fresh = await widget.page._freshFileEntry(widget.file.id);
+    if (!mounted) return;
+    if (fresh != null) {
+      setState(() {
+        _file = fresh;
+        _name = fresh.name;
+      });
+      widget.page._replaceFileEntry(fresh);
+    }
+    if (client != null) {
+      // 简介：每次都现取，不做缓存
+      try {
+        final desc = await client.fileDesc(widget.file.id);
+        if (mounted) setState(() => _desc = desc);
+      } catch (_) {}
+      // 分享信息 + 收藏态：收藏表按分享链接去重，所以先取回分享信息再查；
+      // 取回的这份顺便给下载 / 复制链接 / 二维码用
+      try {
+        final info = await client.shareInfoOfFile(widget.file.id);
+        if (mounted) setState(() => _share = info);
+        // 收藏表查不到（例如库不可用）就保持未知：收藏按钮继续置灰，
+        // 但不影响已经拿到分享信息的几个按钮
+        final favorite = await db.isFavorite(info.url);
+        if (mounted) setState(() => _favorite = favorite);
+      } catch (_) {}
+    }
+    if (mounted) setState(() => _loading = false);
+  }
+
+  /// 普通动作按钮（下载 / 复制链接 / 二维码 / 访问密码）。
+  void _runQuickAction(_FileQuickAction action) {
+    switch (action) {
+      case _FileQuickAction.download:
+        final mark = _downloadTask;
+        if (mark != null) {
+          // 已加入下载：入口改成状态展示，点它弹二级菜单（打开 / 分享 /
+          // 取消下载 / 重新下载）
+          _openDownloadMenu(mark);
+        } else if (!_resolvingDownload) {
+          // 解析中忽略再次点击，避免并发解析两条
+          _startDownload();
+        }
+        break;
+      case _FileQuickAction.link:
+      case _FileQuickAction.qr:
+        _openLinkMenu(action);
+      case _FileQuickAction.password:
+        _editPassword();
+      case _FileQuickAction.favorite:
+        // 开关型按钮走 onToggled，这里不会命中
+        break;
+    }
+  }
+
+  /// 点「下载」：解析期间先在按钮位显示不确定态环；失败恢复原状。
+  Future<void> _startDownload() async {
+    if (_resolvingDownload) return;
+    setState(() => _resolvingDownload = true);
+    await widget.page._downloadOwnFile(_currentFile, share: _share);
+    if (!mounted) return;
+    // 成功的话任务已经入队（标记接管显示）；失败恢复原状
+    setState(() => _resolvingDownload = false);
+  }
+
+  /// 这个文件的「已加入下载」标记：按「账号uid:文件id」查传输任务。
+  TransferTask? get _downloadTask {
+    final activeUid = ref.read(accountStateProvider).store.activeUid ?? '';
+    return ref
+        .read(transferManagerProvider)
+        .downloadMarkOf(driveDownloadKey(activeUid, _file.id));
+  }
+
+  /// 「已加入下载」二级菜单：挂在下载按钮所在的那一段下方（和复制链接同一套锚点）。
+  Future<void> _openDownloadMenu(TransferTask task) async {
+    final RenderBox? group =
+        _quickActionGroupKey.currentContext?.findRenderObject() as RenderBox?;
+    if (group == null || !group.hasSize) return;
+    await showDownloadTaskMenu(
+      context,
+      anchor: _actionMenuAnchor(group, 0),
+      task: task,
+      // 重新下载：旧任务已经删掉，这里重新解析直链再入队；解析期间同样
+      // 走「解析中」状态（按钮位显示不确定态环）
+      onRedownload: _startDownload,
+    );
+  }
+
+  /// 打开二选一菜单。菜单内容依赖被点的是「复制链接」还是「二维码」，
+  /// 所以先重建那一帧再量按钮组的位置，最后挂在被点那一段下方弹出。
+  Future<void> _openLinkMenu(_FileQuickAction target) async {
+    if (_menuTarget != target) setState(() => _menuTarget = target);
+    // 等这一帧画完：按钮组的 RenderBox 这时才有位置可量（endOfFrame 在空闲
+    // 时会自己安排一帧，不必依赖别处 setState 触发）。
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+    final RenderBox? group =
+        _quickActionGroupKey.currentContext?.findRenderObject() as RenderBox?;
+    if (group == null || !group.hasSize) return;
+    final l10n = context.l10n;
+    final bool qr = target == _FileQuickAction.qr;
+    final bool? direct = await showM3eMenu<bool>(
+      context: context,
+      anchor: _linkMenuAnchor(group, target),
+      items: [
+        M3eMenuItem(
+          value: false,
+          label: qr ? l10n.shareLinkQr : l10n.copyShareLink,
+          icon: Icons.share_outlined,
+        ),
+        M3eMenuItem(
+          value: true,
+          label: qr ? l10n.directLinkQr : l10n.copyDirectLink,
+          icon: Icons.file_present,
+        ),
+      ],
+    );
+    if (direct == null || !mounted) return;
+    _pickLinkMenu(direct: direct);
+  }
+
+  /// 被点那一段（复制链接 / 二维码）的全局矩形。
+  ///
+  /// 段宽用和按钮组同一个公式算，保证菜单左缘和那一段对齐；窄窗口按钮组会
+  /// 横向滚动，这里不补偿滚动偏移（和原来挂在组上的做法一致）。
+  /// 按钮组里第 [index] 段的全局矩形（段宽与按钮组内部同一个公式）。
+  Rect _actionMenuAnchor(RenderBox group, int index) {
+    final double segment = m3eIconButtonWidth(group.size.width, 5);
+    final Offset origin = group.localToGlobal(Offset.zero);
+    return Rect.fromLTWH(
+      origin.dx + index * (segment + kM3EIconButtonSpacing),
+      origin.dy,
+      segment,
+      group.size.height,
+    );
+  }
+
+  Rect _linkMenuAnchor(RenderBox group, _FileQuickAction target) =>
+      _actionMenuAnchor(group, target == _FileQuickAction.qr ? 2 : 1);
+
+  /// 菜单里选了「分享链接」还是「下载直链」。
+  ///
+  /// 选完先收起属性弹窗再执行：复制提示条 / 二维码弹窗才不会被属性弹窗盖住。
+  void _pickLinkMenu({required bool direct}) {
+    final page = widget.page;
+    final file = _currentFile;
+    final qr = _menuTarget == _FileQuickAction.qr;
+    if (qr) {
+      if (direct) {
+        page._showDirectLinkQr(file, share: _share);
+      } else {
+        page._showFileQr(file, share: _share);
+      }
+    } else {
+      if (direct) {
+        page._copyDirectLink(file, share: _share);
+      } else {
+        page._copyShareLink(file, share: _share);
+      }
+    }
+  }
+
+  /// 访问密码：弹窗盖在属性弹窗上（与文件夹属性一致），改完再刷新一次
+  /// 「有没有提取码」，让按钮的选中态跟上。
+  Future<void> _editPassword() async {
+    await widget.page._singleSetPasswd(_currentFile);
+    if (mounted) await _refresh();
+  }
+
+  /// 修改文件信息（名称 + 简介）。
+  ///
+  /// 名称没改动时就只保存简介——蓝奏云的重命名接口只对会员开放，这样
+  /// 免费账号仍然可以照常改简介。
+  Future<void> _editInfo() async {
+    final updated = await widget.page._editFileInfo(_currentFile, desc: _desc);
+    if (updated == null || !mounted) return;
+    setState(() {
+      _name = updated.name;
+      _desc = updated.desc;
+    });
+  }
+
+  /// 收藏是开关型按钮：就地切换选中态（乐观更新），失败再回滚。
+  ///
+  /// 不关弹窗——反馈走轻提示，按钮自己的选中态就是最直接的反馈。
+  Future<void> _toggleFavorite(bool checked) async {
+    final page = widget.page;
+    final file = _currentFile;
+    setState(() => _favorite = checked);
+    final ok = checked
+        ? await page._favoriteFile(file)
+        : await page._unfavoriteFile(file);
+    if (!mounted || ok) return;
+    setState(() => _favorite = !checked);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final page = widget.page;
+    final file = _file;
+    final scheme = Theme.of(context).colorScheme;
+    final transfers = ref.read(transferManagerProvider);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        PropertyHeaderCard(
+          icon: iconForFile(file.name),
+          iconColor: fileIconColor(file.name, brightness: scheme.brightness),
+          title: _name,
+          subtitle: [
+            if (file.size.isNotEmpty) prettyLzSize(file.size),
+            if (file.time.isNotEmpty) file.time,
+            if (file.downs > 0) l10n.downloadsCount(file.downs),
+            if (file.hasPwd) l10n.hasPassword,
+          ].join(' · '),
+          desc: _desc,
+          loading: _loading,
+        ),
+        // 常用操作：一行纯图标的标准按钮组（间距 6dp、md 尺寸、
+        // 宽度自适应弹窗，最多 80dp）
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 4, 24, 12),
+          // 菜单（showM3eMenu）要贴在被点的那一段下面，所以这里得量按钮组的
+          // 真实位置：挂个 GlobalKey 给它。
+          child: KeyedSubtree(
+            key: _quickActionGroupKey,
+            // 监听传输管理器：下载中时把进度环画在「下载」按钮的图标位上
+            // （只重建这一行，弹窗关掉就停）
+            child: ListenableBuilder(
+              listenable: Listenable.merge([
+                transfers,
+                transfers.marksRevision,
+              ]),
+              builder: (BuildContext context, _) {
+                final scheme = Theme.of(context).colorScheme;
+                final mark = _downloadTask;
+                final resolving = _resolvingDownload;
+                final tooltip = resolving
+                    ? l10n.resolving
+                    : switch (mark?.status) {
+                        TransferStatus.queued => l10n.waitingToDownload,
+                        TransferStatus.resolving => l10n.resolving,
+                        TransferStatus.running => l10n.downloading,
+                        TransferStatus.resuming => l10n.resumingDownload,
+                        TransferStatus.paused => l10n.paused,
+                        TransferStatus.saving => l10n.saving,
+                        TransferStatus.done => l10n.downloaded,
+                        TransferStatus.failed => l10n.downloadFailed,
+                        _ => l10n.download,
+                      };
+                // 按钮组是 tonal 配色：选中容器 secondary、未选中
+                // secondaryContainer；进度环用各自配套的 on 色，和底色的
+                // 对比度才够（默认 primary 和选中态强调色太接近）
+                M3eCircularProgressIndicator ring({
+                  required Color color,
+                  double? value,
+                }) => M3eCircularProgressIndicator(
+                  value: value,
+                  color: color,
+                  backgroundColor: color.withValues(alpha: 0.2),
+                  size: 24,
+                  strokeWidth: 2.5,
+                );
+                return M3EIconButtonGroup<_FileQuickAction>(
+                  items: [
+                    M3EIconAction(
+                      value: _FileQuickAction.download,
+                      icon: Icons.download_outlined,
+                      checkedIcon: Icons.download_done,
+                      tooltip: tooltip,
+                      // 有任务（未取消）即 checked；解析中还不算，解析成功才选中
+                      checked: mark != null,
+                      // 解析中按钮还没选中，环挂在未选中图标位（容器
+                      // secondaryContainer）；用配套的 onSecondaryContainer 色
+                      iconWidget: !resolving
+                          ? null
+                          : ring(color: scheme.onSecondaryContainer),
+                      checkedIconWidget: switch (mark?.status) {
+                        // 排队中：不确定态，等调度
+                        TransferStatus.queued => ring(
+                          color: scheme.onSecondary,
+                        ),
+                        TransferStatus.resolving => ring(
+                          color: scheme.onSecondary,
+                        ),
+                        // 下载中：确定态；大小未知时退回不确定态
+                        TransferStatus.running => ring(
+                          color: scheme.onSecondary,
+                          value: (mark?.total ?? 0) > 0 ? mark?.progress : null,
+                        ),
+                        TransferStatus.resuming => ring(
+                          color: scheme.onSecondary,
+                        ),
+                        TransferStatus.paused => ring(
+                          color: scheme.onSecondary,
+                          value: (mark?.total ?? 0) > 0 ? mark?.progress : null,
+                        ),
+                        TransferStatus.saving => ring(
+                          color: scheme.onSecondary,
+                          value: (mark?.total ?? 0) > 0 ? mark?.progress : null,
+                        ),
+                        // 下载失败：隐藏小环，换成「下载关闭」图标
+                        TransferStatus.failed => const Icon(
+                          Icons.file_download_off,
+                        ),
+                        _ => null, // 已完成：用 checkedIcon（download_done）
+                      },
+                      // 没有任务时要等分享信息才能下载；有任务 / 解析中随时可操作
+                      enabled: mark != null || resolving || _share != null,
+                    ),
+                    M3EIconAction(
+                      value: _FileQuickAction.link,
+                      icon: Icons.link_outlined,
+                      checkedIcon: Icons.link,
+                      tooltip: l10n.copyLink,
+                      enabled: _share != null,
+                    ),
+                    M3EIconAction(
+                      value: _FileQuickAction.qr,
+                      icon: Icons.qr_code,
+                      checkedIcon: Icons.qr_code,
+                      tooltip: l10n.showQr,
+                      enabled: _share != null,
+                    ),
+                    M3EIconAction(
+                      value: _FileQuickAction.favorite,
+                      icon: Icons.star_border,
+                      checkedIcon: Icons.star_outline,
+                      tooltip: _favorite == true
+                          ? l10n.unfavorite
+                          : l10n.addFavorite,
+                      checked: _favorite == true,
+                      isToggle: true,
+                      // 收藏态要等分享信息 + 收藏表回来才知道，之前先置灰
+                      enabled: _favorite != null,
+                    ),
+                    M3EIconAction(
+                      value: _FileQuickAction.password,
+                      icon: Icons.lock_outline,
+                      checkedIcon: Icons.lock_outline,
+                      tooltip: l10n.accessPassword,
+                      checked: file.hasPwd,
+                      isToggle: true,
+                    ),
+                  ],
+                  onPressed: _runQuickAction,
+                  onToggled: (action, checked) {
+                    if (action == _FileQuickAction.favorite) {
+                      _toggleFavorite(checked);
+                    } else if (action == _FileQuickAction.password) {
+                      _editPassword();
+                    }
+                  },
+                );
+              },
+            ),
+          ),
+        ),
+        SheetListGroup(
+          margin: SheetListGroup.endMargin,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.edit_note),
+              title: Text(l10n.folderInfo),
+              onTap: _editInfo,
+            ),
+            ListTile(
+              leading: const Icon(Icons.drive_file_move_outline),
+              title: Text(l10n.move),
+              onTap: () {
+                Navigator.of(context).pop();
+                page._moveSingleFile(file);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: Text(l10n.delete),
+              onTap: () {
+                Navigator.of(context).pop();
+                page._deleteFile(file);
+              },
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// 文件夹属性弹窗：简介与统计信息变动快，不读缓存——每次打开都重新拉取，
+/// 拉取期间先展示列表里的现有简介并显示加载指示。
+/// 文件夹属性弹窗顶部那一行常用操作（图标按钮组）。
+enum _FolderQuickAction { link, qr, favorite, quickAccess, password }
+
+class _FolderInfoSheet extends ConsumerStatefulWidget {
+  const _FolderInfoSheet({required this.folder, required this.page});
+
+  final LzFolder folder;
+  final _DrivePageState page;
+
+  @override
+  ConsumerState<_FolderInfoSheet> createState() => _FolderInfoSheetState();
+}
+
+class _FolderInfoSheetState extends ConsumerState<_FolderInfoSheet> {
+  late String _name = widget.folder.name;
+  String? _desc;
+  String? _stats;
+
+  /// 简介与统计信息都不再缓存：打开弹窗时总会重新拉取。
+  bool _loading = true;
+
+  /// 是否已固定到快速访问：null = 还在读本地库。
+  bool? _pinned;
+
+  /// 收藏态：null = 还没查到（分享信息 + 收藏表查完才有）。
+  bool? _favorite;
+
+  /// 打开弹窗时取回的分享信息：复制链接 / 二维码直接复用，不再各请求一次。
+  ShareInfo? _share;
+  late bool _hasPwd = widget.folder.hasPwd;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPinned();
+    _fetch();
+  }
+
+  /// 读「是否已固定到快速访问」。读不到就按未固定显示——属性弹窗的其它
+  /// 内容不该被一次本地库读取失败拖下水。
+  Future<void> _loadPinned() async {
+    try {
+      final activeUid = ref.read(accountStateProvider).store.activeUid ?? '';
+      final pinned = await ref
+          .read(appDbProvider)
+          .isPinned(activeUid, widget.folder.id);
+      if (mounted) setState(() => _pinned = pinned);
+    } catch (_) {}
+  }
+
+  Future<void> _toggleQuickAccess() async {
+    final db = ref.read(appDbProvider);
+    final activeUid = ref.read(accountStateProvider).store.activeUid ?? '';
+    if (_pinned == true) {
+      await db.removePin(widget.folder.id);
+      if (mounted) setState(() => _pinned = false);
+    } else {
+      // 只存「所在目录」的相对路径：不含根目录前缀，也不含文件夹自身。
+      // 副标题展示时再按当前语言拼上根目录，这样切换语言后也能跟着变。
+      final ancestors = widget.page._path;
+      final isCurrent =
+          ancestors.isNotEmpty && ancestors.last.id == widget.folder.id;
+      final parents = isCurrent
+          ? ancestors.sublist(0, ancestors.length - 1)
+          : ancestors;
+      await db.addPin(
+        account: activeUid,
+        name: widget.folder.name,
+        ref: widget.folder.id,
+        path: parents.map((node) => node.name).join('/'),
+      );
+      if (mounted) setState(() => _pinned = true);
+    }
+  }
+
+  LzFolder get _folder => LzFolder(
+    id: widget.folder.id,
+    name: _name,
+    desc: _desc ?? widget.folder.desc,
+    hasPwd: _hasPwd,
+  );
+
+  /// 普通动作按钮（复制链接 / 二维码 / 快速访问 / 访问密码）。
+  void _runQuickAction(_FolderQuickAction action) {
+    final page = widget.page;
+    final folder = _folder;
+    switch (action) {
+      case _FolderQuickAction.link:
+        // 不关弹窗：复制完弹轻提示，可以接着扫码 / 收藏
+        page._copyFolderShareLink(folder, share: _share);
+      case _FolderQuickAction.qr:
+        page._showFolderQr(folder, share: _share);
+      case _FolderQuickAction.quickAccess:
+        // 开关型留在弹窗里，选中态即时更新（提示条不参与）
+        _toggleQuickAccess();
+      case _FolderQuickAction.password:
+        _editPassword();
+      case _FolderQuickAction.favorite:
+        // 开关型按钮走 onToggled，这里不会命中
+        break;
+    }
+  }
+
+  /// 收藏：与文件属性一致，就地切换选中态（乐观更新），失败回滚。
+  Future<void> _toggleFavorite(bool checked) async {
+    final page = widget.page;
+    final folder = _folder;
+    setState(() => _favorite = checked);
+    final ok = checked
+        ? await page._favoriteFolder(folder)
+        : await page._unfavoriteFolder(folder);
+    if (!mounted || ok) return;
+    setState(() => _favorite = !checked);
+  }
+
+  Future<void> _editInfo() async {
+    final updated = await widget.page._editFolderInfo(_folder);
+    if (updated == null || !mounted) return;
+    setState(() {
+      _name = updated.name;
+      _desc = updated.desc;
+    });
+  }
+
+  Future<void> _editPassword() async {
+    await widget.page._setFolderPasswd(_folder);
+    // 改完刷新「有没有提取码」，让按钮的选中态跟上
+    if (mounted) await _fetch();
+  }
+
+  Future<void> _fetch() async {
+    final id = widget.folder.id;
+    final client = widget.page._activeClient();
+    final db = ref.read(appDbProvider);
+    // 简介：每次打开都现取，不做缓存
+    try {
+      final info = await client?.shareInfoOfFolder(id);
+      if (info != null && info.desc.isNotEmpty && mounted) {
+        setState(() => _desc = info.desc);
+      }
+      if (info != null && mounted) {
+        setState(() {
+          _share = info;
+          _hasPwd = info.pwd.isNotEmpty;
+        });
+        // 收藏态：收藏表按分享链接去重，用刚取回的分享信息查
+        final favorite = await db.isFavorite(info.url);
+        if (mounted) setState(() => _favorite = favorite);
+      }
+    } catch (_) {}
+    // 统计信息：同样现取；接口取不到时回退到遍历目录统计
+    try {
+      final stats = await client?.folderStats(id);
+      // 这个方法是 initState 里同步调用的：initState 结束前读 context.l10n 在
+      // debug 下会抛 "called before ...initState() completed"，导致 _fetch 中断、
+      // _loading 永远为 true（属性弹窗一直转圈）。放到首次 await 之后再取。
+      if (!mounted) return;
+      final l10n = context.l10n;
+      if (stats != null) {
+        if (stats.desc.isNotEmpty) {
+          setState(() => _desc = stats.desc);
+        }
+        if (stats.size.isNotEmpty || stats.count > 0) {
+          final text = [
+            if (stats.size.isNotEmpty) stats.size,
+            if (stats.count > 0) l10n.fileCount(stats.count),
+          ].join(' · ');
+          setState(() => _stats = text);
+        }
+      } else {
+        final files = client == null
+            ? const <LzFile>[]
+            : await client.listFiles(id);
+        if (files.isNotEmpty && mounted) {
+          final total = files.fold<int>(
+            0,
+            (sum, file) => sum + lzSizeToBytes(file.size),
+          );
+          final text = [
+            formatBytes(total),
+            l10n.fileCount(files.length),
+          ].join(' · ');
+          setState(() => _stats = text);
+        }
+      }
+    } catch (_) {}
+    if (mounted) setState(() => _loading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final folder = widget.folder;
+    final page = widget.page;
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          PropertyHeaderCard(
+            icon: Icons.folder,
+            title: _name,
+            subtitle: [context.l10n.folder, ?_stats].join(' · '),
+            desc: _desc ?? folder.desc,
+            loading: _loading,
+          ),
+          // 常用操作：一行纯图标的标准按钮组（间距 6dp、md 尺寸、
+          // 宽度自适应弹窗，最多 80dp）
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 4, 24, 12),
+            child: M3EIconButtonGroup<_FolderQuickAction>(
+              items: [
+                M3EIconAction(
+                  value: _FolderQuickAction.link,
+                  icon: Icons.link_outlined,
+                  checkedIcon: Icons.link,
+                  tooltip: context.l10n.copyLink,
+                  // 复用弹窗打开时取的分享信息，等它回来再放开
+                  enabled: _share != null,
+                ),
+                M3EIconAction(
+                  value: _FolderQuickAction.qr,
+                  icon: Icons.qr_code,
+                  checkedIcon: Icons.qr_code,
+                  tooltip: context.l10n.showQr,
+                  enabled: _share != null,
+                ),
+                M3EIconAction(
+                  value: _FolderQuickAction.favorite,
+                  icon: Icons.star_border,
+                  checkedIcon: Icons.star_outline,
+                  tooltip: _favorite == true
+                      ? context.l10n.unfavorite
+                      : context.l10n.addFavorite,
+                  checked: _favorite == true,
+                  isToggle: true,
+                  // 收藏态要等分享信息 + 收藏表回来才知道，之前先置灰
+                  enabled: _favorite != null,
+                ),
+                M3EIconAction(
+                  value: _FolderQuickAction.quickAccess,
+                  icon: Icons.push_pin_outlined,
+                  checkedIcon: Icons.push_pin,
+                  tooltip: _pinned == true
+                      ? context.l10n.removeFromQuickAccess
+                      : context.l10n.addToQuickAccess,
+                  checked: _pinned == true,
+                  isToggle: true,
+                  // 固定态要读一次本地库，回来之前先置灰
+                  enabled: _pinned != null,
+                ),
+                M3EIconAction(
+                  value: _FolderQuickAction.password,
+                  icon: Icons.lock_outline,
+                  checkedIcon: Icons.lock_outline,
+                  tooltip: context.l10n.accessPassword,
+                  checked: _hasPwd,
+                  isToggle: true,
+                ),
+              ],
+              onPressed: _runQuickAction,
+              onToggled: (action, checked) {
+                if (action == _FolderQuickAction.favorite) {
+                  _toggleFavorite(checked);
+                } else if (action == _FolderQuickAction.quickAccess) {
+                  _toggleQuickAccess();
+                } else if (action == _FolderQuickAction.password) {
+                  _editPassword();
+                }
+              },
+            ),
+          ),
+          SheetListGroup(
+            margin: SheetListGroup.endMargin,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.edit_note),
+                title: Text(context.l10n.folderInfo),
+                onTap: _editInfo,
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_outline),
+                title: Text(context.l10n.delete),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  page._deleteFolder(_folder);
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class FolderPickResult {
+  const FolderPickResult(this.folderId, this.name, {this.fileName});
+
+  final String folderId;
+  final String name;
+  final String? fileName;
+}
+
+/// 目标文件夹选择弹窗（移动 / 上传共用）。
+Future<FolderPickResult?> showFolderPicker(
+  BuildContext context, {
+  required LanzouClient client,
+  Set<String> excludeIds = const {},
+  String? confirmLabel,
+  String? initialName,
+}) {
+  return showDialog<FolderPickResult>(
+    context: context,
+    builder: (_) => FolderPickerDialog(
+      client: client,
+      excludeIds: excludeIds,
+      confirmLabel: confirmLabel,
+      initialName: initialName,
+    ),
+  );
+}
+
+/// 目标文件夹选择弹窗：路径栏可横滑点击，支持新建文件夹；
+/// 上传模式下顶部可修改文件名。
+class FolderPickerDialog extends StatefulWidget {
+  const FolderPickerDialog({
+    super.key,
+    required this.client,
+    required this.excludeIds,
+    this.confirmLabel,
+    this.initialName,
+  });
+
+  final LanzouClient client;
+
+  /// 需要排除的条目 id（避免把文件夹移进它自己）。
+  final Set<String> excludeIds;
+  final String? confirmLabel;
+
+  /// 上传时预填的文件名；为 null 表示移动模式，不显示名称输入框。
+  final String? initialName;
+
+  @override
+  State<FolderPickerDialog> createState() => _FolderPickerDialogState();
+}
+
+class _FolderPickerDialogState extends State<FolderPickerDialog> {
+  String _folderId = '-1';
+  List<LzFolder> _folders = [];
+  List<PathNode> _path = [];
+  bool _loading = true;
+  String? _error;
+
+  /// 上传模式下文件名为空时的 error state
+  String? _nameError;
+
+  late final TextEditingController _nameController = TextEditingController(
+    text: widget.initialName ?? '',
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _load('-1');
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load(String folderId) async {
+    setState(() {
+      _folderId = folderId;
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final result = await widget.client.listFolders(folderId);
+      if (!mounted) return;
+      setState(() {
+        _folders = result.folders;
+        _path = result.path;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = context.l10n.lanzouError(e);
+      });
+    }
+  }
+
+  void _jumpTo(int index) {
+    final newPath = index < 0 ? <PathNode>[] : _path.sublist(0, index + 1);
+    _load(newPath.isEmpty ? '-1' : newPath.last.id);
+  }
+
+  Future<void> _mkdir() async {
+    // 控制器由弹窗自己持有（见 _FolderNameDialog）
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => const _FolderNameDialog(),
+    );
+    // 名称为空由弹窗自己的 error state 拦住
+    if (name == null || !mounted) return;
+    try {
+      await widget.client.mkdir(_folderId, name);
+      await _load(_folderId);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = context.l10n.lanzouError(e));
+    }
+  }
+
+  String _targetName(AppLocalizations l10n) =>
+      _path.isEmpty ? l10n.root : _path.last.name;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final visible = _folders
+        .where((f) => !widget.excludeIds.contains(f.id))
+        .toList();
+    // 选目标文件夹（可选改名输入框）：套上「不被输入法压扁 + 上移聚焦」外壳
+    return formDialogPan(
+      context,
+      child: AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+        title: Text(l10n.chooseTargetFolder),
+        content: SizedBox(
+          width: 360,
+          height: math.min(440.0, MediaQuery.sizeOf(context).height * 0.55),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (widget.initialName != null) ...[
+                TextField(
+                  controller: _nameController,
+                  onChanged: (_) {
+                    if (_nameError != null) setState(() => _nameError = null);
+                  },
+                  decoration: errorState(
+                    context,
+                    InputDecoration(
+                      isDense: true,
+                      border: const OutlineInputBorder(),
+                      labelText: l10n.nameLabel,
+                    ),
+                    _nameError,
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              Row(
+                children: [
+                  Expanded(
+                    child: PathBar(
+                      segments: [
+                        PathSegment(id: '-1', label: l10n.root),
+                        for (final node in _path)
+                          PathSegment(id: node.id, label: node.name),
+                      ],
+                      onTap: (index) => _jumpTo(index - 1),
+                      verticalPadding: 4,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  IconButton.filledTonal(
+                    tooltip: l10n.newFolder,
+                    icon: const Icon(Icons.create_new_folder_outlined),
+                    onPressed: _loading ? null : _mkdir,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: _loading
+                    ? const Center(child: M3eLoadingIndicator())
+                    : _error != null
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Text(
+                            l10n.loadFailed(_error!),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      )
+                    : visible.isEmpty
+                    ? Center(
+                        child: Text(
+                          l10n.noSubfolders,
+                          style: TextStyle(color: scheme.onSurfaceVariant),
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: EdgeInsets.zero,
+                        itemCount: visible.length,
+                        itemBuilder: (context, index) =>
+                            _folderRow(visible[index]),
+                      ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text(l10n.cancel),
+          ),
+          FilledButton(
+            onPressed: _loading
+                ? null
+                : () {
+                    final edited = _nameController.text.trim();
+                    // 上传模式带改名框：空名字原地标错，不关弹窗
+                    if (widget.initialName != null && edited.isEmpty) {
+                      setState(() => _nameError = l10n.pleaseEnterName);
+                      return;
+                    }
+                    Navigator.of(context).pop(
+                      FolderPickResult(
+                        _folderId,
+                        _targetName(l10n),
+                        fileName: widget.initialName == null ? null : edited,
+                      ),
+                    );
+                  },
+            child: Text(widget.confirmLabel ?? l10n.moveHere),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// MD3E 目录行：圆角图标块 + 名称 + 进入箭头。
+  Widget _folderRow(LzFolder folder) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(14),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => _load(folder.id),
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Row(
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    Icons.folder_outlined,
+                    size: 19,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    folder.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyLarge,
+                  ),
+                ),
+                Icon(Icons.chevron_right, size: 20, color: scheme.outline),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

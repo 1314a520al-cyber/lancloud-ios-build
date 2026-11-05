@@ -1,0 +1,162 @@
+name: lancloud
+description: "蓝奏云第三方客户端"
+# The following line prevents the package from being accidentally published to
+# pub.dev using `flutter pub publish`. This is preferred for private packages.
+publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+
+# The following defines the version and build number for your application.
+# A version number is three numbers separated by dots, like 1.2.43
+# followed by an optional build number separated by a +.
+# Both the version and the builder number may be overridden in flutter
+# build by specifying --build-name and --build-number, respectively.
+# In Android, build-name is used as versionName while build-number used as versionCode.
+# Read more about Android versioning at https://developer.android.com/studio/publish/versioning
+# In iOS, build-name is used as CFBundleShortVersionString while build-number is used as CFBundleVersion.
+# Read more about iOS versioning at
+# https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
+# In Windows, build-name is used as the major, minor, and patch parts
+# of the product and file versions while build-number is used as the build suffix.
+# 版本号规范：version: 年份.内容更新序号.热修号[-阶段.序号]+versionCode，
+# versionCode = YY*10^7 + Drop*10^5 + Hotfix*10^4 + ABI*10^3 + Stage*10^2 + Seq
+# （这里存 ABI=0 的基准号；ABI 位由 android/app/build.gradle.kts 构建时加上）。
+# 详见 docs/VERSIONING.md；改完记得同步 lib/core/app_info.dart（有测试校验）。
+version: 26.1.0-pre.31+260100231
+
+environment:
+  sdk: ^3.13.7
+  # GitHub Actions 通过 flutter-version-file 读取该版本，避免多处手动同步。
+  flutter: 3.47.9
+
+# Dependencies specify other packages that your package needs in order to work.
+# To automatically upgrade your package dependencies to the latest versions
+# consider running `flutter pub upgrade --major-versions`. Alternatively,
+# dependencies can be manually updated by changing the version numbers below to
+# the latest version available on pub.dev. To see which dependencies have newer
+# versions available, run `flutter pub outdated`.
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  intl: any
+
+  dio: ^5.11.1
+  sqflite: ^2.4.5
+  # 桌面端（Windows）用 FFI 实现跑 SQLite；Android/iOS 仍走 sqflite 原生实现
+  sqflite_common_ffi: ^2.4.5
+  # Windows 注册表（「清除数据」的注册表项目）：win32 API + FFI 字符串工具
+  ffi: ^2.2.0
+  win32: ^6.4.0
+  path: ^1.9.1
+  path_provider: ^2.1.6
+  shared_preferences: ^2.5.5
+  shared_preferences_android: ^2.5.4
+  flutter_secure_storage: ^11.2.0
+  file_picker: ">=13.3.0 <13.3.1"
+  # 13.3.1 起 dbus 依赖 0.8.0，而 desktop_drop 0.8.4 依赖 0.7.10，冲突。
+  # 等 file_picker 跟进 cross_file 0.4 后再处理。
+  open_filex: ^5.0.0
+  url_launcher: ^6.3.2
+  flutter_inappwebview: 6.2.0-beta.3
+  qr: ^4.0.1
+  material_symbols_icons: ^4.2960.0
+  flutter_local_notifications: ^22.3.3
+  lpinyin: ^2.0.3
+  receive_sharing_intent: ^1.9.0
+  flutter_foreground_task: ^11.0.3
+  local_auth: ^3.0.2
+  # 直接依赖平台实现包，用于传入系统验证弹窗的本地化文案
+  local_auth_android: 2.3.0
+  local_auth_darwin: 2.0.5
+  # 2.x 起基于 material_ui（1.x 给的是框架版 ColorScheme，迁移后类型对不上）
+  dynamic_color: 2.1.0
+  zxing2: ^0.2.4
+  image: ^4.12.0
+  # Windows / macOS / Linux 的窗口级拖拽（拖文件或链接进来）
+  # 0.9.x 改用 cross_file 0.4 / Win32 6；file_picker 13 尚未跟进
+  # cross_file 0.4（但已依赖 Win32 6），两者暂时无法同时解析。
+  # 等 file_picker 支持 cross_file 0.4 后再成组升级。
+  desktop_drop: ">=0.8.4 <0.9.0"
+  # Flutter 3.47 起 Material 从框架拆到了 material_ui，本项目已整体迁移过去
+  # （见 docs / 提交记录）；m3e_core 提供 MD3E 控件，cupertino_ui 承接
+  # Cupertino 组件。三者版本要配套升级。
+  m3e_core: ^1.1.5
+  # 1.8 新增的 RoundedPolygon 与 m3e_core 1.1.4 的同名类型冲突；
+  # 待 m3e_core 适配后再放开 <1.8.0。
+  material_ui: ^1.9.0
+  cupertino_ui: ^1.1.5
+  cryptography: ^2.9.0
+  # 应用级状态与依赖注入统一使用 Riverpod。
+  flutter_riverpod: ^3.4.3
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  # The "flutter_lints" package below contains a set of recommended lints to
+  # encourage good coding practices. The lint set provided by the package is
+  # activated in the `analysis_options.yaml` file located at the root of your
+  # package. See that file for information about deactivating specific lint
+  # rules and activating additional ones.
+  flutter_lints: ^6.0.0
+  # 测试里替换 url_launcher 的平台实现，断言「反馈」跳转的 mailto 地址
+  url_launcher_platform_interface: ^2.3.2
+
+# For information on the generic Dart part of this file, see the
+# following page: https://dart.dev/tools/pub/pubspec
+
+# The following section is specific to Flutter packages.
+flutter:
+
+  # The following line ensures that the Material Icons font is
+  # included with your application, so that you can use the icons in
+  # the material Icons class.
+  uses-material-design: true
+  generate: true
+
+  # To add assets to your application, add an assets section, like this:
+  assets:
+    # 应用图标（首次启动页 / 关于页展示）
+    - assets/images/logo/app_icon.png
+    # Windows 通知图标：AUMID 的 IconUri 需要一个真实文件路径，运行时会把
+    # 对应构建类型的 .ico 复制到应用数据目录。
+    - windows/runner/resources/app_icon.ico
+    - windows/runner/resources/app_icon_badge.ico
+
+  # 图标字体：Remix Icon 的 star-off-line 单字形子集，「取消收藏」菜单项用
+  # （U+F59A；笔画粗细和 Material Symbols 一致）。许可证文本登记在
+  # lib/core/third_party_licenses.dart。需要更多 Remix 字形时：拿完整的
+  # remixicon.ttf 重新子集化（subset-font）后替换本文件。
+  fonts:
+    - family: RemixIcon
+      fonts:
+        - asset: assets/fonts/remixicon_subset.ttf
+
+  # An image asset can refer to one or more resolution-specific "variants", see
+  # https://flutter.dev/to/resolution-aware-images
+
+  # For details regarding adding assets from package dependencies, see
+  # https://flutter.dev/to/asset-from-package
+
+  # To add custom fonts to your application, add a fonts section here,
+  # in this "flutter" section. Each entry in this list should have a
+  # "family" key with the font family name, and a "fonts" key with a
+  # list giving the asset and other descriptors for the font. For
+  # example:
+  # fonts:
+  #   - family: Schyler
+  #     fonts:
+  #       - asset: fonts/Schyler-Regular.ttf
+  #       - asset: fonts/Schyler-Italic.ttf
+  #         style: italic
+  #   - family: Trajan Pro
+  #     fonts:
+  #       - asset: fonts/TrajanPro.ttf
+  #       - asset: fonts/TrajanPro_Bold.ttf
+  #         weight: 700
+  #
+  # For details regarding fonts from package dependencies,
+  # see https://flutter.dev/to/font-from-package
+
+dependency_overrides:
+  shared_preferences_foundation: 2.5.4
+  receive_sharing_intent: 1.8.1

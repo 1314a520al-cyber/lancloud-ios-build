@@ -1,0 +1,1400 @@
+import 'dart:async';
+import 'dart:math' as math;
+
+import 'package:material_ui/material_ui.dart' hide Icons;
+import 'package:flutter/foundation.dart' show listEquals, visibleForTesting;
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:dynamic_color/dynamic_color.dart';
+import 'package:path/path.dart' as p;
+
+import 'core/account_state.dart';
+import 'core/agreements.dart';
+import 'core/app_runtime_state.dart';
+import 'core/api/lanzou_client_registry.dart';
+import 'core/cache_page_settings_state.dart';
+import 'core/drag_drop.dart';
+import 'core/drive_state.dart';
+import 'core/file_open_result.dart';
+import 'core/incoming_links.dart';
+import 'core/lanzou_link.dart';
+import 'core/language_clipboard_settings_state.dart';
+import 'core/navigation_appearance_settings_state.dart';
+import 'core/navigation_state.dart';
+import 'core/notifications.dart';
+import 'core/platform_support.dart';
+import 'core/share_inbox.dart';
+import 'core/system_motion.dart';
+import 'core/system_open.dart';
+import 'core/theme_settings_state.dart';
+import 'core/transfer/transfer_manager.dart';
+import 'core/transfer/transfer_manager_provider.dart';
+import 'core/window_frame.dart';
+import 'l10n/delegates.dart';
+import 'l10n/l10n.dart';
+import 'ui/drive_page.dart';
+import 'ui/desktop_drop_target.dart';
+import 'ui/drop_actions.dart';
+import 'ui/file_open_feedback.dart';
+import 'ui/first_run_terms.dart';
+import 'ui/favorites_page.dart';
+import 'ui/home_page.dart';
+import 'ui/login_page.dart';
+import 'ui/m3e.dart';
+import 'ui/predictive_back_transitions.dart';
+import 'ui/profile_page.dart';
+import 'ui/reduce_motion.dart';
+import 'ui/app_scroll.dart';
+import 'ui/common.dart';
+import 'ui/scroll_tint.dart';
+import 'ui/share_page.dart';
+import 'ui/system_ui.dart';
+import 'ui/transfers_page.dart';
+import 'ui/transfer_running_count.dart';
+import 'ui/app_icons.dart';
+import 'ui/update_prompt.dart';
+import 'ui/wenshu_page.dart';
+
+/// SnackBar 在大屏上的最大宽度。小屏不设置固定宽度，继续使用浮动 SnackBar
+/// 的默认左右安全边距；否则固定宽度会被屏幕约束压到贴边。
+const double kSnackBarMaxWidth = 600;
+
+/// M3 浮动 SnackBar 的默认左右安全边距。
+const double _kSnackBarMinHorizontalInset = 15;
+
+/// 按当前视口宽度应用 SnackBar 宽度约束。
+ThemeData withResponsiveSnackBarWidth(ThemeData theme, double viewportWidth) {
+  if (viewportWidth < kLargeLayoutBreakpoint) return theme;
+  // 固定 width 会让 SnackBar 外层的 ClipRect 也收缩到该宽度，600dp 时
+  // Material 阴影正好落在裁切边界外。改用左右外边距限制内容宽度，让
+  // ClipRect 保持整屏宽，同时内容仍不超过 600dp。
+  final horizontalInset = math.max(
+    _kSnackBarMinHorizontalInset,
+    (viewportWidth - kSnackBarMaxWidth) / 2,
+  );
+  return theme.copyWith(
+    snackBarTheme: theme.snackBarTheme.copyWith(
+      insetPadding: EdgeInsets.fromLTRB(
+        horizontalInset,
+        5,
+        horizontalInset,
+        10,
+      ),
+    ),
+  );
+}
+
+class LanCloudApp extends ConsumerStatefulWidget {
+  const LanCloudApp({super.key});
+
+  static const seed = Color(0xFF2E6BE6);
+
+  @override
+  ConsumerState<LanCloudApp> createState() => _LanCloudAppState();
+}
+
+class _LanCloudAppState extends ConsumerState<LanCloudApp> {
+  /// 根 Navigator：给 Windows 鼠标侧键「后退」用（maybePop 与系统返回键同效）。
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+
+  @override
+  Widget build(BuildContext context) {
+    final themeSettings = ref.watch(themeSettingsStateProvider);
+    final languageSettings = ref.watch(languageClipboardSettingsStateProvider);
+    // MD3 动态取色：系统壁纸取色（Android 12+），不支持时返回 null。
+    // 外面这层只在系统「移除动画」开关 / 用户「全局动画」设置变化时重建整棵树，
+    // 让各处的 reduceMotionOf 立刻生效（其余时候不会重复构建）。
+    return ListenableBuilder(
+      listenable: Listenable.merge([
+        SystemMotion.reduceMotion,
+        SystemMotion.touchExploration,
+        SystemMotion.motionMode,
+        themeSettings.revision,
+        languageSettings.revision,
+        // 第一次检测到鼠标时重建一次，让「点图标块 = 多选」各处生效
+        PointerSupport.hasMouse,
+      ]),
+      builder: (context, _) {
+        final seed = Color(themeSettings.themeSeed);
+        final oledDark = themeSettings.oledBlack;
+        final useDynamicColor = themeSettings.dynamicColor;
+        final mode = themeSettings.themeMode;
+        final language = languageSettings.language;
+        return DynamicColorBuilder(
+          builder: (lightDynamic, darkDynamic) {
+            ThemeData buildTheme(Brightness brightness) => buildLanCloudTheme(
+              brightness: brightness,
+              seed: seed,
+              oledDark: oledDark,
+              dynamicScheme: useDynamicColor
+                  ? (brightness == Brightness.dark ? darkDynamic : lightDynamic)
+                  : null,
+            );
+            return MaterialApp(
+              navigatorKey: _navigatorKey,
+              // 系统「最近任务」里的应用名（桌面图标名由 Android 资源 app_name 决定，
+              // 任务卡片这里是 Flutter 的 Title 设置的，要跟着语言走）
+              onGenerateTitle: (context) => context.l10n.currentAppDisplayName,
+              debugShowCheckedModeBanner: false,
+              locale: language == 'zh'
+                  ? const Locale('zh')
+                  : language == 'en'
+                  ? const Locale('en')
+                  : null,
+              supportedLocales: AppLocalizations.supportedLocales,
+              localizationsDelegates: appLocalizationsDelegates,
+              theme: buildTheme(Brightness.light),
+              darkTheme: buildTheme(Brightness.dark),
+              themeMode: mode == 'light'
+                  ? ThemeMode.light
+                  : mode == 'dark'
+                  ? ThemeMode.dark
+                  : ThemeMode.system,
+              // 全局 BouncingScrollPhysics（网盘页同款）
+              scrollBehavior: const AppScrollBehavior(),
+              // 系统栏（状态栏 / 导航栏）样式跟随主题明暗：
+              // Android 15+ 导航栏强制透明，能调的只有图标明暗与是否加系统遮罩。
+              builder: (context, child) => Theme(
+                data: withResponsiveSnackBarWidth(
+                  Theme.of(context),
+                  MediaQuery.sizeOf(context).width,
+                ),
+                child: MousePresenceDetector(
+                  child: MouseBackButtonListener(
+                    // Windows 鼠标侧键「后退」= 系统返回键（与 Android 返回同一条路径）
+                    enabled: PlatformSupport.isWindows,
+                    onBack: () => _navigatorKey.currentState?.maybePop(),
+                    child: AnnotatedRegion<SystemUiOverlayStyle>(
+                      value: systemUiOverlayStyleFor(
+                        Theme.of(context).brightness,
+                      ),
+                      // M3E：强调排版落到顶栏标题 / 弹窗标题 / 主要按钮 / 导航选中项，
+                      // 挂在 Navigator 之上（弹窗、对话框同样能取到）。
+                      child: M3eComponentStyles(
+                        // 桌面端在窗口这一层接住拖拽（Android 走原生通道，这里原样透传）
+                        child: DesktopDropTarget(
+                          child: Stack(
+                            children: [
+                              child ?? const SizedBox.shrink(),
+                              // 拖拽悬停提示条挂在 Navigator 之上：二级页面也能看到
+                              const DropHoverBanner(),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              home: const AgreementGate(),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+/// 应用主题（Material 3 + MD3E 细节）。抽出来便于测试。
+///
+/// 注意 [ThemeData.iconTheme] 必须保留默认图标颜色：如果传入一个
+/// "只有字重 / 填充轴、没有颜色"的 IconThemeData，IconButton 解析到的
+/// 前景色会是 null，深色模式下图标会被画成黑色。
+ThemeData buildLanCloudTheme({
+  required Brightness brightness,
+  required Color seed,
+  required bool oledDark,
+  ColorScheme? dynamicScheme,
+}) {
+  // 动态取色（Android 12+）优先，取不到时回退到主题色。
+  //
+  // 注意：dynamic_color 给的色板只包含旧版角色，surfaceContainer /
+  // surfaceContainerHigh / surfaceDim 这些 MD3 新角色没赋值，读取时会退化成
+  // surface，于是背景、卡片、导航区全变成一个颜色（看起来处处纯白）。
+  // 这里用系统取到的主色重新生成完整色板：保留壁纸色相，同时补齐所有角色。
+  final scheme = ColorScheme.fromSeed(
+    seedColor: dynamicScheme?.primary ?? seed,
+    brightness: brightness,
+  );
+  final theme = ThemeData(
+    colorScheme: scheme,
+    // Windows 默认字体（Segoe UI）没有汉字，Flutter 的兜底字体会挑到日文字形，
+    // 部分部首看着像繁体/日文。这里把中文兜底固定成微软雅黑（简体字形），
+    // 拉丁字母与数字仍用系统默认字体。
+    fontFamilyFallback: PlatformSupport.isWindows
+        ? const ['Microsoft YaHei UI', 'Microsoft YaHei']
+        : null,
+    // 预测性返回：沿用 Flutter 的跟手转场，并在被露出的上一页上
+    // 叠加一层随手势淡出的黑色遮罩（AOSP 设置同款）。
+    pageTransitionsTheme: kLanCloudPageTransitionsTheme,
+    scaffoldBackgroundColor: (brightness == Brightness.dark && oledDark)
+        ? Colors.black
+        : null,
+    appBarTheme: AppBarTheme(
+      // 全局顶栏标题靠左（iOS 默认居中，这里统一改为左对齐）
+      centerTitle: false,
+      scrolledUnderElevation: 0,
+      backgroundColor: (brightness == Brightness.dark && oledDark)
+          ? Colors.black
+          : null,
+      systemOverlayStyle: SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: brightness == Brightness.dark
+            ? Brightness.light
+            : Brightness.dark,
+        statusBarBrightness: brightness == Brightness.dark
+            ? Brightness.dark
+            : Brightness.light,
+      ),
+    ),
+    snackBarTheme: const SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.all(Radius.circular(12)),
+      ),
+    ),
+    // MD3 扁平化：控件统一去阴影
+    cardTheme: const CardThemeData(elevation: 0),
+    navigationBarTheme: const NavigationBarThemeData(elevation: 0),
+    floatingActionButtonTheme: const FloatingActionButtonThemeData(
+      elevation: 0,
+      focusElevation: 0,
+      hoverElevation: 0,
+      highlightElevation: 0,
+      disabledElevation: 0,
+    ),
+    // MD3 Expressive 按钮组（connected）：细描边 + 圆角容器 + 选中勾选
+    segmentedButtonTheme: SegmentedButtonThemeData(
+      style: ButtonStyle(
+        side: WidgetStatePropertyAll(BorderSide(color: scheme.outlineVariant)),
+        visualDensity: VisualDensity.standard,
+        tapTargetSize: MaterialTapTargetSize.padded,
+        animationDuration: const Duration(milliseconds: 240),
+      ),
+    ),
+    // 统一使用 Android 12+ 风格的柔边波纹
+    splashFactory: InkSparkle.splashFactory,
+  );
+  // Material Symbols 可变轴：weight 400 / grade 0 / optical size 24（fill 0）。
+  // 必须用 copyWith 保留主题默认图标颜色——直接传一个"只有轴、没有颜色"的
+  // IconThemeData 会让 IconButton 前景色变成 null，深色模式下图标画成黑色。
+  return theme.copyWith(
+    iconTheme: theme.iconTheme.copyWith(
+      fill: 0,
+      weight: 400,
+      grade: 0,
+      opticalSize: 24,
+    ),
+  );
+}
+
+/// 首次启动先请求同意用户协议与隐私政策；不同意则退出应用。
+class AgreementGate extends StatefulWidget {
+  const AgreementGate({super.key});
+
+  @override
+  State<AgreementGate> createState() => _AgreementGateState();
+}
+
+class _AgreementGateState extends State<AgreementGate> {
+  bool _checked = false;
+  bool _accepted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    Agreements.accepted().then((value) {
+      if (!mounted) return;
+      setState(() {
+        _checked = true;
+        _accepted = value;
+      });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final phase = !_checked
+        ? 'loading'
+        : _accepted
+        ? 'start'
+        : 'terms';
+    final child = KeyedSubtree(
+      key: ValueKey(phase),
+      child: !_checked
+          ? const Scaffold(body: Center(child: M3eLoadingIndicator()))
+          : !_accepted
+          ? FirstRunTerms(onAccepted: () => setState(() => _accepted = true))
+          // 自动检测到新版本时，在任意页面主动提醒一次（条款同意之后才挂上）
+          : const UpdatePromptHost(child: RootShell()),
+    );
+    return AnimatedSwitcher(
+      duration: reduceMotionOf(context)
+          ? Duration.zero
+          : const Duration(milliseconds: 300),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      layoutBuilder: (currentChild, previousChildren) => Stack(
+        fit: StackFit.expand,
+        children: [...previousChildren, ?currentChild],
+      ),
+      transitionBuilder: (child, animation) {
+        final incoming = child.key == ValueKey(phase);
+        const distance = 0.04;
+        return SlideTransition(
+          position: Tween<Offset>(
+            begin: incoming
+                ? const Offset(distance, 0)
+                : const Offset(-distance, 0),
+            end: Offset.zero,
+          ).animate(animation),
+          child: FadeTransition(opacity: animation, child: child),
+        );
+      },
+      child: child,
+    );
+  }
+}
+
+/// 返回手势能否交给系统处理（系统才会播放退回桌面的预测性返回动画）。
+///
+/// 只有「默认视图 + 非多选 + 没有进行中的传输 + 网盘页没有可返回的层级」时
+/// 才交给系统；其余情况必须由 Flutter 拦下来做应用内导航（切默认视图 /
+/// 返回上级目录 / 退出多选）或传输中的退出确认，此时按官方语义不做预测动画。
+///
+/// [selectionMode] 由 NavigationState 统一维护：网盘 / 传输 / 收藏页的多选
+/// 都会把它置为 true，所以这三页（在底栏显示时）的多选都会被拦下来。
+@visibleForTesting
+bool canHandBackToSystem({
+  required bool selectionMode,
+  required bool hasActiveTransfers,
+  required bool atDefaultView,
+  required bool driveCanHandleBack,
+}) =>
+    !selectionMode &&
+    !hasActiveTransfers &&
+    atDefaultView &&
+    !driveCanHandleBack;
+
+const double _floatingNavigationTopGap = 16;
+const double _floatingNavigationBottomGap = 12;
+
+class RootShell extends ConsumerStatefulWidget {
+  const RootShell({super.key});
+
+  @override
+  ConsumerState<RootShell> createState() => _RootShellState();
+}
+
+typedef _ShellStateSnapshot = ({
+  bool ready,
+  String? activeUid,
+  bool secureStorageNeedsReauthentication,
+  bool showTransfers,
+  bool showFavorites,
+  bool floatingNavBar,
+  bool swipeTabs,
+  bool hideTopBar,
+  bool hideBottomBar,
+  bool selectionMode,
+});
+
+class _ShellStateBuilder extends StatefulWidget {
+  const _ShellStateBuilder({
+    required this.runtime,
+    required this.accounts,
+    required this.navigation,
+    required this.appearance,
+    required this.builder,
+  });
+
+  final AppRuntimeState runtime;
+  final AccountState accounts;
+  final NavigationState navigation;
+  final NavigationAppearanceSettingsState appearance;
+  final Widget Function(BuildContext context, _ShellStateSnapshot shell)
+  builder;
+
+  @override
+  State<_ShellStateBuilder> createState() => _ShellStateBuilderState();
+}
+
+class _ShellStateBuilderState extends State<_ShellStateBuilder> {
+  late _ShellStateSnapshot _shell = _readShell();
+
+  _ShellStateSnapshot _readShell() => (
+    ready: widget.runtime.ready.value,
+    activeUid: widget.accounts.store.activeUid,
+    secureStorageNeedsReauthentication:
+        widget.runtime.secureStorageNeedsReauthentication.value,
+    showTransfers: widget.appearance.navShowTransfers,
+    showFavorites: widget.appearance.navShowFavorites,
+    floatingNavBar: widget.appearance.floatingNavBar,
+    swipeTabs: widget.appearance.swipeTabs,
+    hideTopBar: widget.appearance.hideTopBar,
+    hideBottomBar: widget.appearance.hideBottomBar,
+    selectionMode: widget.navigation.selectionMode,
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _addListeners();
+  }
+
+  void _addListeners() {
+    widget.runtime.ready.addListener(_onChanged);
+    widget.runtime.secureStorageNeedsReauthentication.addListener(_onChanged);
+    widget.accounts.addListener(_onChanged);
+    widget.navigation.addListener(_onChanged);
+    widget.appearance.revision.addListener(_onChanged);
+  }
+
+  void _onChanged() {
+    final next = _readShell();
+    if (next == _shell) return;
+    setState(() => _shell = next);
+  }
+
+  @override
+  void dispose() {
+    widget.runtime.ready.removeListener(_onChanged);
+    widget.runtime.secureStorageNeedsReauthentication.removeListener(
+      _onChanged,
+    );
+    widget.accounts.removeListener(_onChanged);
+    widget.navigation.removeListener(_onChanged);
+    widget.appearance.revision.removeListener(_onChanged);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context, _shell);
+}
+
+class _RootShellState extends ConsumerState<RootShell>
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
+  /// 视图 id：0 首页 / 1 网盘 / 2 传输 / 3 收藏 / 4 文叔叔 / 5 我的。
+  /// id 固定不变，底栏顺序由 [_ids] 决定（传输、收藏可隐藏）。
+  static const _viewHome = 0;
+  static const _viewDrive = 1;
+  static const _viewTransfers = 2;
+  static const _viewFavorites = 3;
+  static const _viewWenshu = 4;
+  static const _viewProfile = 5;
+
+  /// 当前底栏包含的视图 id（顺序即底栏顺序）。
+  List<int> _ids = const <int>[];
+  bool _navConfigPending = false;
+
+  int _index = 0;
+  bool _programmaticJump = false;
+  Size? _lastSize;
+
+  late final AppRuntimeState _runtime;
+  late final AccountState _accounts;
+  late final NavigationState _navigation;
+  late final NavigationAppearanceSettingsState _appearance;
+  late final CachePageSettingsState _cacheSettings;
+  late final LanguageClipboardSettingsState _languageSettings;
+  late final LanzouClientRegistry _clients;
+  late final DriveState _drive;
+  // 横竖屏切换跨越 640px 布局阈值时，PageView 会在 Scaffold.body 与
+  // Row/NavigationRail 两个不同深度的父级之间移动；ValueKey 无法跨父级
+  // 保留元素，重建后像素偏移会落到错误的页。GlobalKey 可让 PageView 只
+  // 移动、不重建。切换账号时更换 key，以保留重新挂载刷新页面的语义。
+  String? _pageViewUid;
+  late GlobalKey _pageViewKey = GlobalKey();
+  late PageController _pageController = PageController(initialPage: _index);
+  bool _pagerSyncPending = false;
+
+  /// 分页器重排后尚未挂载的检查次数。宽窄布局切换会先卸载旧父级、
+  /// 再把同一个 PageView 挂到新父级，期间控制器可能短暂没有客户端；
+  /// 等后续帧自然挂载即可，不能在这里换 key 重建整棵页面树。
+  int _pagerAttachChecks = 0;
+
+  /// 大屏正文卡片顶边的高度过渡：不同视图的顶栏高度不一样（网盘有路径栏、
+  /// 传输有分段条），切换视图时平滑移动；滚动收起仍按 [NavigationState.topBarHide]
+  /// 1:1 跟手，不参与这段动画。
+  late final AnimationController _cardTopAnim = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 280),
+  );
+  double _cardTopFrom = 0;
+  double _cardTopTo = 0;
+
+  double get _animatedCardTop {
+    final t = Curves.easeOutCubic.transform(_cardTopAnim.value);
+    return _cardTopFrom + (_cardTopTo - _cardTopFrom) * t;
+  }
+
+  /// 目标顶栏高度变化时启动过渡（首次直接定位，不播动画）。
+  void _syncCardTop(double target) {
+    if (_cardTopTo == 0) {
+      _cardTopFrom = target;
+      _cardTopTo = target;
+      return;
+    }
+    if (target == _cardTopTo) return;
+    _cardTopFrom = _animatedCardTop;
+    _cardTopTo = target;
+    // 系统要求少动效：顶边直接跳到新高度，不做过渡
+    if (reduceMotionOf(context)) {
+      _cardTopAnim.value = 1;
+      return;
+    }
+    _cardTopAnim.forward(from: 0);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 系统「移除动画 / 减弱动态效果」：控制器里读不到 MediaQuery，
+    // 这里同步一份，供顶栏/底栏收起动画直接到位
+    _runtime.systemReduceMotion.value = reduceMotionOf(context);
+    _syncWindowFrame();
+    // 旋转后视口尺寸变化，PageView 的像素偏移会对应到错误的页，
+    // 这里在布局结束后校正回当前标签，避免“底栏指向原视图但内容回到首页”。
+    final size = MediaQuery.sizeOf(context);
+    if (_lastSize != null && _lastSize != size) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _pageController.hasClients) {
+          _pageController.jumpToPage(_index);
+        }
+      });
+    }
+    _lastSize = size;
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _navigation.onSwitchTab = null;
+    NotificationService.onAction = null;
+    SharedInbox.instance.onText = null;
+    SharedInbox.instance.onFiles = null;
+    SharedInbox.instance.dispose();
+    DragDropChannel.instance.dispose();
+    IncomingLinks.instance.onLink = null;
+    IncomingLinks.instance.dispose();
+    _pageController.dispose();
+    _cardTopAnim.dispose();
+    super.dispose();
+  }
+
+  /// 当前底栏显示项：首页 / 网盘 + （可选的）传输 / 收藏 + 我的。
+  List<int> _enabledIds({
+    required bool showTransfers,
+    required bool showFavorites,
+  }) => <int>[
+    _viewHome,
+    _viewDrive,
+    if (showTransfers) _viewTransfers,
+    if (showFavorites) _viewFavorites,
+    _viewWenshu,
+    _viewProfile,
+  ];
+
+  /// 各视图顶栏高度：大屏布局用它决定圆角内容卡片的起点。
+  double _topBarHeightFor(int viewId) {
+    final top = MediaQuery.paddingOf(context).top;
+    return switch (viewId) {
+      _viewDrive => top + kToolbarHeight + kDrivePathBarHeight,
+      _viewTransfers => top + kToolbarHeight + kTransfersTabBarHeight,
+      _ => top + kToolbarHeight,
+    };
+  }
+
+  Widget _pageFor(int id) => switch (id) {
+    _viewHome => const HomePage(tabIndex: _viewHome),
+    _viewDrive => const DrivePage(tabIndex: _viewDrive),
+    _viewTransfers => const TransfersPage(),
+    _viewFavorites => const FavoritesPage(tabIndex: _viewFavorites),
+    _viewWenshu => const WenshuPage(tabIndex: _viewWenshu),
+    _ => const ProfilePage(tabIndex: _viewProfile),
+  };
+
+  /// 大屏外壳里正文卡片底部的 8dp 留白：一般页面在页面外面统一让开
+  /// （卡片让了，页面正文跟着让，页面里不用再各写一套）。
+  ///
+  /// 「我的」页两栏态例外：它的左窗格是导航区，要通到窗口底边，所以整页
+  /// 不让位，由页面自己给右卡片补这一档（见 [shellBodyCardGap]）。
+  Widget _withBodyCardGap(BuildContext context, int viewId, Widget child) {
+    final gap = shellBodyCardGap(context);
+    final pageHandlesGap =
+        viewId == _viewProfile &&
+        MediaQuery.sizeOf(context).width >= kProfileTwoPaneBreakpoint;
+    // 固定保留这一层 Padding：小屏 gap=0 时也仍要占同一元素槽位。
+    // 否则宽窄布局切换会把“页面”换成“Padding(页面)”，页面 State 被重建。
+    return Padding(
+      padding: EdgeInsets.only(bottom: pageHandlesGap || gap == 0 ? 0 : gap),
+      child: child,
+    );
+  }
+
+  IconData _iconFor(int id, {required bool selected}) => switch (id) {
+    _viewHome => Icons.browse_outlined,
+    _viewDrive => selected ? Icons.folder : Icons.folder_outlined,
+    _viewTransfers => selected ? Icons.swap_vert : Icons.swap_vert_outlined,
+    _viewFavorites => selected ? Icons.star_outline : Icons.star_border,
+    _viewWenshu => selected ? Icons.upload : Icons.upload,
+    _ => selected ? Icons.person : Icons.person_outline,
+  };
+
+  String _labelFor(int id, AppLocalizations l10n) => switch (id) {
+    _viewHome => l10n.tabHome,
+    _viewDrive => l10n.tabDrive,
+    _viewTransfers => l10n.tabTransfers,
+    _viewFavorites => l10n.favorite,
+    _viewWenshu => l10n.tabWenshu,
+    _ => l10n.tabProfile,
+  };
+
+  /// 打开某个视图：在底栏显示时切换到对应页，否则作为新页面打开。
+  void _goTo(int viewId) {
+    final i = _ids.indexOf(viewId);
+    if (i < 0) {
+      _openView(viewId);
+      return;
+    }
+    if (i == _index) return;
+    // 切换视图（含底栏、侧栏、程序化跳转）时退出多选
+    if (_navigation.selectionMode) {
+      _navigation.onRequestExitSelection?.call();
+    }
+    // 切换视图时收起输入法，避免返回该页时键盘又弹出来
+    FocusManager.instance.primaryFocus?.unfocus();
+    // 切换视图时把被收起的顶/底栏带动画调出来
+    _navigation.animateBarsHide(0, reduceMotion: reduceMotionOf(context));
+    setState(() => _index = i);
+    _programmaticJump = true;
+    if (_pageController.hasClients) {
+      // 系统要求少动效：直接跳页，不做左右滑动的切页动画
+      if (reduceMotionOf(context)) {
+        _pageController.jumpToPage(i);
+        _programmaticJump = false;
+        _schedulePagerSync();
+        return;
+      }
+      _pageController
+          .animateToPage(
+            i,
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+          )
+          .whenComplete(() {
+            if (!mounted) return;
+            _programmaticJump = false;
+            // 若分页器因为重新挂载而没有真正翻页，这里把它拉回来
+            _schedulePagerSync();
+          });
+    } else {
+      _programmaticJump = false;
+      _schedulePagerSync();
+    }
+  }
+
+  /// 未显示在底栏的视图：以独立页面打开同样的界面。
+  void _openView(int viewId) {
+    Navigator.of(context).push(
+      // 大屏（横屏 / 平板）下独立打开的标签页也套 MD3E 卡片：
+      // 顶栏高度与外壳里一致，顶栏收起进度共用 NavigationState.topBarHide
+      MaterialPageRoute<void>(
+        builder: (_) => Md3ePageFrame(
+          topBarHeight: _topBarHeightFor(viewId),
+          hide: _navigation.topBarHide,
+          child: _pageFor(viewId),
+        ),
+      ),
+    );
+  }
+
+  /// 底栏显示项变化：下一帧按新页序重建，尽量停留在当前视图。
+  void _syncNavConfig(List<int> ids) {
+    if (_navConfigPending) return;
+    _navConfigPending = true;
+    final target = List<int>.unmodifiable(ids);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _navConfigPending = false;
+      if (!mounted) return;
+      final current = _ids.isEmpty
+          ? target.first
+          : _ids[_index.clamp(0, _ids.length - 1)];
+      final next = target.contains(current) ? target.indexOf(current) : 0;
+      setState(() {
+        _ids = target;
+        _index = next;
+      });
+      _navigation.activeTab.value = target[next];
+      if (_pageController.hasClients) _pageController.jumpToPage(next);
+    });
+  }
+
+  /// 兜底：分页器被重新挂载（换账号、切换 loading 页）后可能停在初始页，
+  /// 与底栏高亮错位时把它拉回当前视图，避免「内容不动、底栏点了没反应」。
+  void _schedulePagerSync() {
+    if (_pagerSyncPending) return;
+    _pagerSyncPending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _pagerSyncPending = false;
+      if (!mounted || _programmaticJump) return;
+      // 控制器暂时还没连上分页器：宽窄布局切换期间是正常的跨父级移动，
+      // 等下一帧再检查。这里若换 key 重建分页器，会销毁所有标签页状态。
+      if (!_pageController.hasClients) {
+        if (_pagerAttachChecks >= 3) return;
+        _pagerAttachChecks++;
+        _schedulePagerSync();
+        return;
+      }
+      _pagerAttachChecks = 0;
+      final position = _pageController.position;
+      // 用户滑动 / 补间动画进行中不打断
+      if (position.isScrollingNotifier.value) return;
+      final page = _pageController.page?.round();
+      if (page != null && page != _index) {
+        _pageController.jumpToPage(_index);
+      }
+    });
+  }
+
+  int get _defaultViewId =>
+      _cacheSettings.launchPage == 'drive' ? _viewDrive : _viewHome;
+
+  /// 当前视图 id（底栏配置还没就绪时按首页算）。
+  int get _currentViewId => _ids.isEmpty ? _viewHome : _ids[_index];
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _runtime = ref.read(appRuntimeStateProvider);
+    _accounts = ref.read(accountStateProvider);
+    _navigation = ref.read(navigationStateProvider);
+    _appearance = ref.read(navigationAppearanceSettingsStateProvider);
+    _cacheSettings = ref.read(cachePageSettingsStateProvider);
+    _languageSettings = ref.read(languageClipboardSettingsStateProvider);
+    _clients = ref.read(lanzouClientRegistryProvider);
+    _drive = ref.read(driveStateProvider);
+    _ids = _enabledIds(
+      showTransfers: _appearance.navShowTransfers,
+      showFavorites: _appearance.navShowFavorites,
+    );
+    _navigation.onSwitchTab = _goTo;
+    NotificationService.onAction = _handleNotificationAction;
+    SharedInbox.instance.onText = _handleSharedText;
+    SharedInbox.instance.onFiles = _handleSharedFiles;
+    SharedInbox.instance.attach();
+    DragDropChannel.instance.onDrop = _handleDrop;
+    DragDropChannel.instance.attach();
+    IncomingLinks.instance.onLink = _handleIncomingLink;
+    IncomingLinks.instance.attach();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _processPendingShare();
+      final url = IncomingLinks.instance.pending;
+      IncomingLinks.instance.pending = null;
+      if (url != null) _handleIncomingLink(url);
+      _checkClipboard();
+      final notificationAction = NotificationService.takePendingAction();
+      if (notificationAction != null) {
+        _handleNotificationAction(notificationAction);
+      }
+    });
+    _index = _ids.indexOf(_defaultViewId).clamp(0, _ids.length - 1);
+    // 记录初始视图，便于页面判断自己是否被激活
+    _navigation.activeTab.value = _ids[_index];
+  }
+
+  void _handleNotificationAction(NotificationAction action) {
+    switch (action.kind) {
+      case NotificationActionKind.transfers:
+        _goTo(_viewTransfers);
+      case NotificationActionKind.openFile:
+        unawaited(_openFileFromNotification(action));
+    }
+  }
+
+  Future<void> _openFileFromNotification(NotificationAction action) async {
+    final opened = await openFileWithSystem(action.path, name: action.name);
+    if (opened.isSuccess || !mounted) return;
+    _goTo(_viewTransfers);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          fileOpenFailureMessage(
+            context.l10n,
+            opened.failure ?? FileOpenFailure.systemError,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _handleSharedText(String text) {
+    final link = LanzouLink.parse(text);
+    if (link == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.shareTargetUnsupported)),
+      );
+      return;
+    }
+    openShareSheet(context, initialLink: link.url, initialPwd: link.pwd);
+  }
+
+  /// 外部链接（点开蓝奏云分享链接默认交给本应用）。
+  void _handleIncomingLink(String url) {
+    final link = LanzouLink.parse(url);
+    if (link == null) return;
+    _lastClipboardText = url;
+    openShareSheet(context, initialLink: link.url, initialPwd: link.pwd);
+  }
+
+  /// 已处理过的剪贴板内容，避免同一条链接反复提示。
+  String? _lastClipboardText;
+
+  /// 拖拽落下：按「内容类型 + 当前视图」交给统一的处理入口。
+  Future<void> _handleDrop(DropPayload payload) async {
+    if (!mounted) return;
+    final outcome = await handleExternalDrop(
+      context,
+      payload,
+      onDrivePage: _drive.driveVisible,
+      onFavoritesPage: _drive.favoritesVisible,
+    );
+    if (!mounted || outcome == null) return;
+    showDropSummary(context, outcome);
+  }
+
+  /// 回到前台时看看剪贴板里有没有蓝奏云分享链接（类似淘口令）。
+  Future<void> _checkClipboard() async {
+    if (!mounted) return;
+    if (!_languageSettings.clipboardLinkPrompt) return;
+    // 没有账号时（首次启动 / 登录页）不打扰
+    if (_accounts.store.activeUid == null) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final l10n = context.l10n;
+    // 回到前台的一瞬间剪贴板可能还读不到，稍等一下再取
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    if (!mounted) return;
+    String? text;
+    try {
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      text = data?.text?.trim();
+    } catch (_) {
+      return;
+    }
+    if (text == null || text.isEmpty || text == _lastClipboardText) return;
+    _lastClipboardText = text;
+    final link = LanzouLink.parse(text);
+    if (link == null) return;
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(l10n.clipboardLinkFound),
+        action: SnackBarAction(
+          label: l10n.open,
+          onPressed: () {
+            if (!mounted) return;
+            openShareSheet(
+              context,
+              initialLink: link.url,
+              initialPwd: link.pwd,
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _checkClipboard();
+  }
+
+  /// 系统主题切换时同步窗口边框（应用内主题切换走 didChangeDependencies）。
+  @override
+  void didChangePlatformBrightness() => _syncWindowFrame();
+
+  /// 让 Windows 的窗口边框 / 标题栏跟随应用主题，而不是系统主题。
+  void _syncWindowFrame() =>
+      WindowFrame.setDark(Theme.of(context).brightness == Brightness.dark);
+
+  Future<void> _handleSharedFiles(List<String> files) async {
+    final store = _accounts.store;
+    final uid = store.activeUid;
+    final client = uid == null
+        ? null
+        : _clients.clientFor(uid, cookie: store.byUid(uid)?.cookie);
+    if (client == null || uid == null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(context.l10n.notLoggedIn)));
+      return;
+    }
+    final target = await showFolderPicker(
+      context,
+      client: client,
+      confirmLabel: context.l10n.uploadHere,
+      initialName: files.length == 1 ? p.basename(files.first) : null,
+    );
+    if (target == null || !mounted) return;
+    final transfers = ref.read(transferManagerProvider);
+    var added = 0;
+    for (final path in files) {
+      final editedName = target.fileName;
+      final name =
+          files.length == 1 && editedName != null && editedName.isNotEmpty
+          ? editedName
+          : p.basename(path);
+      transfers.addUpload(name: name, folderId: target.folderId, path: path);
+      added += 1;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(context.l10n.shareReceivedFiles(added))),
+    );
+  }
+
+  void _processPendingShare() {
+    final inbox = SharedInbox.instance;
+    final text = inbox.pendingText;
+    inbox.pendingText = null;
+    if (text != null && text.isNotEmpty) {
+      _handleSharedText(text);
+      return;
+    }
+    final files = inbox.pendingFiles;
+    inbox.pendingFiles = [];
+    if (files.isNotEmpty) _handleSharedFiles(files);
+  }
+
+  List<TransferTask> get _activeTasks => ref
+      .read(transferManagerProvider)
+      .tasks
+      .where(
+        (t) =>
+            t.status == TransferStatus.running ||
+            t.status == TransferStatus.queued ||
+            t.status == TransferStatus.resolving ||
+            t.status == TransferStatus.resuming ||
+            t.status == TransferStatus.saving,
+      )
+      .toList();
+
+  Future<bool> _handleBack() async {
+    final defaultView = _defaultViewId;
+    final transfers = ref.read(transferManagerProvider);
+    final active = _activeTasks;
+    if (_navigation.selectionMode) {
+      _navigation.onRequestExitSelection?.call();
+      return false;
+    }
+    final currentView = _currentViewId;
+    // 网盘视图：先让页面处理（返回上一级目录）
+    if (currentView == _viewDrive && _navigation.onDriveBack != null) {
+      final handled = await _navigation.onDriveBack!();
+      if (handled) return false;
+    }
+    // 我的视图：先让页面处理（退出搜索 / 关闭二级设置页）
+    if (currentView == _viewProfile && _navigation.onProfileBack != null) {
+      final handled = await _navigation.onProfileBack!();
+      if (handled) return false;
+    }
+    if (currentView != defaultView) {
+      _goTo(defaultView);
+      return false;
+    }
+    if (active.isEmpty) return true;
+    if (!mounted) return false;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(context.l10n.exitTitle),
+        content: Text(context.l10n.exitMessage(active.length)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(context.l10n.keepTransferring),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(context.l10n.exitAndCancel),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return false;
+    for (final task in active) {
+      transfers.cancel(task.id);
+    }
+    return true;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final manager = ref.watch(transferManagerProvider);
+    return _ShellStateBuilder(
+      runtime: _runtime,
+      accounts: _accounts,
+      navigation: _navigation,
+      appearance: _appearance,
+      builder: (context, shell) => TransferRunningCount(
+        manager: manager,
+        builder: (context, running) => _buildShell(context, shell, running),
+      ),
+    );
+  }
+
+  Widget _buildShell(
+    BuildContext context,
+    _ShellStateSnapshot shell,
+    int running,
+  ) {
+    final l10n = context.l10n;
+    NotificationService.i18n = l10n;
+    if (shell.activeUid != _pageViewUid) {
+      _pageViewUid = shell.activeUid;
+      _pageViewKey = GlobalKey();
+      // 换账号会重建分页器：新控制器直接以当前视图为初始页，
+      // 否则会回到首页并与底栏高亮错位（点当前的底栏项没反应）。
+      final previous = _pageController;
+      _pageController = PageController(initialPage: _index);
+      WidgetsBinding.instance.addPostFrameCallback((_) => previous.dispose());
+    }
+    if (!shell.ready) {
+      return const Scaffold(body: Center(child: M3eLoadingIndicator()));
+    }
+    if (shell.activeUid == null) {
+      return LoginPage(
+        firstRun: true,
+        credentialsResetNotice: shell.secureStorageNeedsReauthentication,
+      );
+    }
+    // 底栏显示项变化时，下一帧按新页序重建
+    if (_ids.isEmpty) {
+      _ids = _enabledIds(
+        showTransfers: shell.showTransfers,
+        showFavorites: shell.showFavorites,
+      );
+    } else {
+      final ids = _enabledIds(
+        showTransfers: shell.showTransfers,
+        showFavorites: shell.showFavorites,
+      );
+      if (!listEquals(ids, _ids)) {
+        _syncNavConfig(ids);
+      } else {
+        _schedulePagerSync();
+      }
+    }
+
+    // 底栏整体高度：悬浮样式含上下留白，用于 1:1 跟随滚动的收起距离，
+    // 再加上系统手势区（导航栏）的高度。普通底栏由 NavigationBar 自己
+    // 用 SafeArea 把这份内边距垫在内容下方；悬浮样式则算进下留白，
+    // 让 64dp 高的胶囊浮在系统导航栏上方。底栏槽位高度由组件和上下留白
+    // 共同推导，否则这份内边距会从内容里扣，图标和文字被压扁。
+    final systemPadding = MediaQuery.paddingOf(context);
+    // 键盘弹出时 padding.bottom 会归零（导航栏那一段被输入法盖住），但底栏高度
+    // 不能跟着抽动一下——用 viewPadding（系统栏原始值，键盘弹出时保持不变）。
+    // 底栏此时本来就被输入法盖着，多留这一段不会露出空白。
+    final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
+    final floatingBarHeight =
+        M3eFloatingNavigationBar.containerHeight +
+        _floatingNavigationTopGap +
+        _floatingNavigationBottomGap;
+    final barHeight =
+        (shell.floatingNavBar ? floatingBarHeight : 80.0) + bottomInset;
+    final keyed = KeyedSubtree(
+      key: ValueKey('shell-${shell.activeUid}'),
+      // 横向滑动切换视图；设置里可关闭手势（只能点底栏切换）
+      child: PageView(
+        key: _pageViewKey,
+        controller: _pageController,
+        physics: shell.swipeTabs
+            ? const PageScrollPhysics()
+            : const NeverScrollableScrollPhysics(),
+        onPageChanged: (i) {
+          // 程序化跳转经过中间页时保持指示器停留在目标，避免底栏按钮闪烁
+          if (_programmaticJump && i != _index) return;
+          // 横滑切换视图时同样退出多选
+          if (shell.selectionMode) {
+            _navigation.onRequestExitSelection?.call();
+          }
+          FocusManager.instance.primaryFocus?.unfocus();
+          // 视图真正切换后：恢复底栏并通知页面把折叠的顶栏调出来
+          _navigation.animateBarsHide(0, reduceMotion: reduceMotionOf(context));
+          _navigation.activeTab.value = _ids[i];
+          setState(() => _index = i);
+        },
+        children: [
+          for (final id in _ids)
+            // 切走后离屏页面不销毁：滚动位置、列表入场动画状态都保留
+            //（PageView 默认会把离屏页销毁重建）
+            KeepAlivePage(
+              key: ValueKey('view-$id'),
+              child: _withBodyCardGap(
+                context,
+                id,
+                ScrollTint(
+                  hideDistance: barHeight,
+                  readBarsHidden: () => _navigation.barsHide.value,
+                  onBarsHidden: (shell.hideTopBar || shell.hideBottomBar)
+                      ? _navigation.setBarsHideFromScroll
+                      : null,
+                  child: _pageFor(id),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+
+    Widget iconFor(int viewId, {required bool selected}) {
+      // 选中项用 Material Symbols 的 FILL 轴切成实心（未选中保持描边）
+      final icon = Icon(
+        _iconFor(viewId, selected: selected),
+        fill: selected ? 1 : 0,
+      );
+      if (viewId != _viewTransfers || running == 0) return icon;
+      // 角标数字单独读出来没有上下文，给读屏补一句「N 个任务进行中」
+      return Semantics(
+        label: context.l10n.notifProgressBody(running),
+        excludeSemantics: true,
+        child: Badge(label: Text('$running'), child: icon),
+      );
+    }
+
+    final width = MediaQuery.sizeOf(context).width;
+    final scheme = Theme.of(context).colorScheme;
+    // 大屏卡片顶边跟着当前视图的顶栏高度走，切换视图时平滑过渡
+    if (width >= kLargeLayoutBreakpoint && _ids.isNotEmpty) {
+      _syncCardTop(_topBarHeightFor(_ids[_index]));
+    }
+    // 大屏（MD3E）：侧栏等导航区用 surfaceContainer，主视图是圆角的 surface 卡片
+    final bodyColor = Theme.of(context).scaffoldBackgroundColor;
+    final floatingNav = shell.floatingNavBar;
+    final navBar = M3eShellNavigationBar(
+      floating: floatingNav,
+      selectedIndex: _index,
+      onDestinationSelected: (pos) {
+        if (shell.selectionMode) {
+          _navigation.onRequestExitSelection?.call();
+        }
+        _goTo(_ids[pos]);
+      },
+      items: [
+        for (final id in _ids)
+          M3eShellNavigationItem(
+            icon: iconFor(id, selected: false),
+            selectedIcon: iconFor(id, selected: true),
+            label: _labelFor(id, l10n),
+            semanticsLabel: id == _viewTransfers && running > 0
+                ? '${_labelFor(id, l10n)}，${l10n.notifProgressBody(running)}'
+                : null,
+          ),
+      ],
+    );
+    // 返回手势何时交给系统：只有「默认视图 + 没有要拦截的目标」才置
+    // canPop=true，系统才会播放退回桌面的预测性返回动画（官方语义：
+    // PopScope.canPop=false 时不做预测动画）。其余情况（多选 / 网盘
+    // 子目录或搜索 / 非默认视图 / 传输中的退出确认）交给 _handleBack 处理。
+    final currentView = _currentViewId;
+    final largeLayout = width >= kLargeLayoutBreakpoint;
+    return ValueListenableBuilder<bool>(
+      valueListenable: _navigation.driveCanHandleBack,
+      builder: (context, driveCanHandleBack, child) {
+        final canPop = canHandBackToSystem(
+          selectionMode: shell.selectionMode,
+          hasActiveTransfers: running > 0,
+          atDefaultView: currentView == _defaultViewId,
+          driveCanHandleBack: currentView == _viewDrive && driveCanHandleBack,
+        );
+        return PopScope(
+          canPop: canPop,
+          onPopInvokedWithResult: (didPop, result) async {
+            if (didPop) return;
+            final shouldExit = await _handleBack();
+            if (shouldExit && mounted) {
+              await SystemNavigator.pop();
+            }
+          },
+          child: child!,
+        );
+      },
+      // 宽窄布局必须共用同一条元素路径。旋转 / 分屏 / 折叠时只改变约束和
+      // 侧栏、底栏的显示，不能把 PageView 从 Scaffold.body 搬到另一层 Row，
+      // 否则即使带 GlobalKey，整棵页面子树也会被重建，所有页面 State 归零。
+      child: Scaffold(
+        backgroundColor: largeLayout ? scheme.surfaceContainer : null,
+        // 小屏正文绘制到底栏下方：滑动时内容从底栏后穿过，
+        // 底栏跟随滚动下沉 / 收起时正文也不会跟着重排。
+        extendBody: !largeLayout,
+        body: Row(
+          children: [
+            if (largeLayout)
+              NavigationRail(
+                backgroundColor: Colors.transparent,
+                selectedIndex: _index,
+                // 统一用非展开样式：图标在上、文字在下，栏宽 72dp。
+                // 展开样式（extended）要 256dp，对这几个短标题太宽了。
+                extended: false,
+                // 手机横屏 / 平板等侧栏形态下按钮组在栏内垂直居中；
+                // NavigationRail 默认 -1 贴顶，高屏上会离屏幕上半部太远。
+                groupAlignment: 0,
+                labelType: NavigationRailLabelType.all,
+                onDestinationSelected: (i) => _goTo(_ids[i]),
+                destinations: [
+                  for (final id in _ids)
+                    NavigationRailDestination(
+                      icon: iconFor(id, selected: false),
+                      selectedIcon: iconFor(id, selected: true),
+                      label: Text(_labelFor(id, l10n)),
+                    ),
+                ],
+              ),
+            Expanded(
+              // 侧栏只在宽布局出现；给正文区固定 key，避免 Row 增加子项时
+              // 把正文当成“换到下一个 child”重新挂载。
+              key: const ValueKey('shell-page-area'),
+              child: AnimatedBuilder(
+                // 滚动收起进度 + 切换视图时卡片顶边的高度过渡
+                animation: largeLayout
+                    ? Listenable.merge([_navigation.topBarHide, _cardTopAnim])
+                    : const AlwaysStoppedAnimation<double>(0),
+                child: keyed,
+                builder: (context, pageView) {
+                  final hide = _navigation.topBarHide.value;
+                  final t = shell.hideTopBar ? hide.clamp(0.0, 1.0) : 0.0;
+                  return Stack(
+                    children: [
+                      if (largeLayout)
+                        Positioned(
+                          left: 0,
+                          top: _animatedCardTop * (1 - t),
+                          // 卡片四周的 8dp 留白之外，再让开系统导航栏：
+                          // 横屏时它可能在底部（手势导航）或在右侧（三键导航），
+                          // 否则卡片底部/右侧会被系统栏压住
+                          right: 8 + systemPadding.right,
+                          bottom: 8 + systemPadding.bottom,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(16),
+                            child: ColoredBox(color: bodyColor),
+                          ),
+                        ),
+                      Positioned(
+                        left: 0,
+                        top: 0,
+                        right: largeLayout ? 8 + systemPadding.right : 0,
+                        // 大屏正文只让系统导航栏，底部那 8dp 由页面自己让
+                        //（见 _withBodyCardGap）——「我的」页两栏态的
+                        // 左窗格是导航区，要一直通到窗口底边
+                        bottom: largeLayout ? systemPadding.bottom : 0,
+                        // 卡片已经按 left/right inset 让过位了，
+                        // 页面内（AppBar / SafeArea / Scrollbar）不要再让一次
+                        child: MediaQuery.removePadding(
+                          context: context,
+                          removeLeft: largeLayout,
+                          removeRight: largeLayout,
+                          removeBottom: largeLayout,
+                          child: pageView!,
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+        // 底栏跟随滚动按比例下沉；完全收起后腾出布局空间
+        bottomNavigationBar: largeLayout
+            ? null
+            : ValueListenableBuilder<double>(
+                valueListenable: _navigation.barsHide,
+                builder: (context, hide, child) {
+                  final fullyHidden = shell.hideBottomBar && hide >= 0.999;
+                  return ExcludeFocus(
+                    excluding: fullyHidden,
+                    child: ExcludeSemantics(
+                      excluding: fullyHidden,
+                      child: SizedBox(
+                        height: shell.hideBottomBar
+                            ? barHeight * (1 - hide)
+                            : barHeight,
+                        child: ClipRect(
+                          child: OverflowBox(
+                            alignment: Alignment.topCenter,
+                            // minHeight 必须等于完整高度：否则底栏会被压扁（内容缩放）而不是滑出
+                            minHeight: barHeight,
+                            maxHeight: barHeight,
+                            child: child,
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+                child: Padding(
+                  padding: floatingNav
+                      ? const EdgeInsets.only(top: _floatingNavigationTopGap)
+                      : EdgeInsets.zero,
+                  child: Container(
+                    alignment: floatingNav ? Alignment.center : null,
+                    margin: floatingNav
+                        // 底部留白要加上系统导航栏的高度：胶囊本身保持
+                        // 64dp 浮在导航栏上方，而不是把导航栏那段也算进胶囊
+                        // （否则胶囊下沿会拖出一截空白色）。
+                        ? EdgeInsets.fromLTRB(
+                            12,
+                            0,
+                            12,
+                            _floatingNavigationBottomGap + bottomInset,
+                          )
+                        : EdgeInsets.zero,
+                    // 悬浮样式把系统手势区的内边距从胶囊里摘掉，改由上面
+                    // 的下留白承担；普通底栏仍由 NavigationBar 自己垫在内容下方。
+                    // top 也要去掉：这里不再经过 Scaffold 的底栏槽位（槽位会
+                    // 去掉顶部内边距），否则状态栏高度会被 SafeArea 垫进胶囊。
+                    // padding 和 viewPadding 都要清：NavigationBar 现在按
+                    // viewPadding 垫底部（maintainBottomViewPadding），只清
+                    // padding 的话胶囊里还会空出一段导航栏高度。
+                    child: floatingNav
+                        ? MediaQuery(
+                            data: MediaQuery.of(context).copyWith(
+                              padding: MediaQuery.of(context).padding
+                                  .copyWith(top: 0, bottom: 0),
+                              viewPadding: MediaQuery.of(context).viewPadding
+                                  .copyWith(top: 0, bottom: 0),
+                            ),
+                            child: navBar,
+                          )
+                        : navBar,
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
+}
+
+/// 让分页器里的这个视图常驻：切走后不销毁，滚动位置、列表入场动画
+/// 状态都保留（PageView 默认只保活声明了 keep-alive 的页面）。
+///
+/// 用 [AutomaticKeepAliveClientMixin] 而不是 `KeepAlive` 组件：后者必须
+/// 贴在 sliver 的槽位那一层，套在外层包装里会因 parent data 类型不符而崩。
+class KeepAlivePage extends StatefulWidget {
+  const KeepAlivePage({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  State<KeepAlivePage> createState() => _KeepAlivePageState();
+}
+
+class _KeepAlivePageState extends State<KeepAlivePage>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context); // AutomaticKeepAliveClientMixin 要求
+    return widget.child;
+  }
+}

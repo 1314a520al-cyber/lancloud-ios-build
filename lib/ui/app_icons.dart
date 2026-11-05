@@ -1,0 +1,182 @@
+// ignore_for_file: constant_identifier_names
+
+import 'package:flutter/widgets.dart' show IconData;
+import 'package:material_symbols_icons/material_symbols_icons.dart';
+
+/// 应用统一的图标集：使用新的 Material Symbols 字体。
+/// 沿用旧 Material Icons 的名称，内部映射到 [Symbols]。
+///
+/// 使用处请通过 `import 'package:material_ui/material_ui.dart' hide Icons;`
+/// 隐藏 material_ui 自带的 Icons，再引入本文件。
+class Icons {
+  Icons._();
+
+  static const IconData add = Symbols.add;
+  static const IconData album_outlined = Symbols.album;
+  static const IconData android_outlined = Symbols.android;
+  static const IconData animation = Symbols.animation;
+  static const IconData arrow_back = Symbols.arrow_back;
+  static const IconData arrow_upward = Symbols.arrow_upward;
+  static const IconData article_outlined = Symbols.article;
+  static const IconData auto_awesome_motion = Symbols.auto_awesome_motion;
+  static const IconData badge_outlined = Symbols.badge;
+  static const IconData battery_alert_outlined = Symbols.battery_alert;
+  static const IconData battery_0_bar = Symbols.battery_0_bar;
+  static const IconData bolt_boost = Symbols.bolt_boost;
+  static const IconData bottom_navigation = Symbols.bottom_navigation;
+  static const IconData browse_outlined = Symbols.browse;
+  static const IconData bug_report_outlined = Symbols.bug_report;
+  static const IconData build_outlined = Symbols.build;
+  static const IconData cached_outlined = Symbols.cached;
+  static const IconData cancel = Symbols.cancel;
+  static const IconData check = Symbols.check;
+  static const IconData check_circle = Symbols.check_circle;
+  static const IconData checklist = Symbols.checklist;
+  static const IconData chevron_right = Symbols.chevron_right;
+  static const IconData cleaning_services_outlined = Symbols.cleaning_services;
+  static const IconData close = Symbols.close;
+  static const IconData code_outlined = Symbols.code;
+  static const IconData cloud_off = Symbols.cloud_off;
+  static const IconData cloud_outlined = Symbols.cloud;
+  static const IconData colors = Symbols.colors;
+  static const IconData cloud_download = Symbols.cloud_download;
+  static const IconData cloud_done = Symbols.cloud_done;
+  static const IconData cloud_upload_outlined = Symbols.cloud_upload;
+  static const IconData content_paste_go = Symbols.content_paste_go;
+  static const IconData contrast = Symbols.contrast;
+  static const IconData contract = Symbols.contract;
+  static const IconData copy = Symbols.content_copy;
+  static const IconData create_new_folder_outlined = Symbols.create_new_folder;
+  static const IconData dark_mode_outlined = Symbols.dark_mode;
+  static const IconData dashboard = Symbols.dashboard;
+  static const IconData dashboard_outlined = Symbols.dashboard;
+  static const IconData delete_outline = Symbols.delete;
+  static const IconData delete_sweep_outlined = Symbols.delete_sweep;
+  static const IconData description_outlined = Symbols.description;
+  static const IconData dns_outlined = Symbols.dns;
+  static const IconData done_all = Symbols.done_all;
+  static const IconData download = Symbols.download;
+  static const IconData download_done = Symbols.download_done;
+  static const IconData download_for_offline_outlined =
+      Symbols.download_for_offline;
+  static const IconData download_outlined = Symbols.download;
+  static const IconData drive_file_move_outline = Symbols.drive_file_move;
+  static const IconData edit = Symbols.edit;
+  static const IconData edit_note = Symbols.edit_note;
+  static const IconData error = Symbols.error;
+  static const IconData error_outline = Symbols.error_outline;
+  static const IconData file_download_off = Symbols.file_download_off;
+  static const IconData file_open = Symbols.file_open;
+  static const IconData file_present = Symbols.file_present;
+  static const IconData flashlight_on_outlined = Symbols.flashlight_on;
+  static const IconData flip = Symbols.flip;
+  static const IconData folder = Symbols.folder;
+  static const IconData folder_open = Symbols.folder_open;
+  static const IconData folder_outlined = Symbols.folder;
+  static const IconData folder_special_outlined = Symbols.folder_special;
+  static const IconData folder_zip_outlined = Symbols.folder_zip;
+  static const IconData font_download_outlined = Symbols.font_download;
+  static const IconData grid_view = Symbols.grid_view;
+  static const IconData history = Symbols.history;
+  static const IconData home_outlined = Symbols.home;
+  static const IconData image_outlined = Symbols.image;
+  static const IconData info_outline = Symbols.info;
+  static const IconData ink_eraser = Symbols.ink_eraser;
+  static const IconData insert_drive_file_outlined = Symbols.insert_drive_file;
+  static const IconData install_mobile = Symbols.install_mobile;
+  static const IconData keep_off = Symbols.keep_off;
+  static const IconData key_outlined = Symbols.key;
+  static const IconData link = Symbols.link;
+  static const IconData link_outlined = Symbols.link;
+  static const IconData wallpaper_outlined = Symbols.wallpaper;
+  static const IconData lock_outline = Symbols.lock;
+  static const IconData notifications_outlined = Symbols.notifications;
+  static const IconData login = Symbols.login;
+  static const IconData logout = Symbols.logout;
+  static const IconData mail_outlined = Symbols.mail;
+  static const IconData menu_book_outlined = Symbols.menu_book;
+  static const IconData mobile_info = Symbols.mobile_info;
+  static const IconData more_horiz = Symbols.more_horiz;
+  static const IconData more_vert = Symbols.more_vert;
+  static const IconData movie_outlined = Symbols.movie;
+  static const IconData music_note_outlined = Symbols.music_note;
+  static const IconData open_in_browser = Symbols.open_in_browser;
+  static const IconData open_in_new = Symbols.open_in_new;
+  static const IconData palette_outlined = Symbols.palette;
+  static const IconData photo_library_outlined = Symbols.photo_library;
+  static const IconData photo_camera_outlined = Symbols.photo_camera;
+  static const IconData password = Symbols.password;
+  static const IconData pause = Symbols.pause;
+  static const IconData pause_circle_outline = Symbols.pause_circle;
+  static const IconData play_arrow = Symbols.play_arrow;
+  static const IconData playlist_add = Symbols.playlist_add;
+  static const IconData playlist_remove = Symbols.playlist_remove;
+  static const IconData page_info = Symbols.page_info;
+  static const IconData person = Symbols.person;
+  static const IconData person_outline = Symbols.person;
+  static const IconData people_outline = Symbols.people;
+  static const IconData picture_as_pdf_outlined = Symbols.picture_as_pdf;
+  static const IconData public = Symbols.public;
+  static const IconData push_pin = Symbols.push_pin;
+  static const IconData push_pin_outlined = Symbols.push_pin;
+  static const IconData qr_code = Symbols.qr_code;
+  static const IconData radio_button_checked = Symbols.radio_button_checked;
+  static const IconData radio_button_unchecked = Symbols.radio_button_unchecked;
+  static const IconData refresh = Symbols.refresh;
+  static const IconData restore_from_trash_outlined =
+      Symbols.restore_from_trash;
+  static const IconData search = Symbols.search;
+  static const IconData save = Symbols.save;
+  static const IconData security = Symbols.security;
+  static const IconData select_all = Symbols.select_all;
+  static const IconData settings_outlined = Symbols.settings;
+  static const IconData shield = Symbols.shield;
+  static const IconData shield_person = Symbols.shield_person;
+  static const IconData settings_backup_restore =
+      Symbols.settings_backup_restore;
+  static const IconData share_outlined = Symbols.share;
+  static const IconData slideshow_outlined = Symbols.slideshow;
+  static const IconData smart_button = Symbols.smart_button;
+  static const IconData speed = Symbols.speed;
+  static const IconData schedule = Symbols.schedule;
+  static const IconData star_border = Symbols.star_border;
+  static const IconData star_outline = Symbols.star;
+
+  /// 「取消收藏」用的星形划斜杠（描边）：来自 Remix Icon 图标集的
+  /// star-off-line（U+F59A），笔画粗细与 Material Symbols 一致。
+  /// 字形随仓库自带的单字形字体子集（assets/fonts/remixicon_subset.ttf，
+  /// 见 pubspec），许可证见设置-关于-开源许可。
+  static const IconData star_off_line = IconData(
+    0xf59a,
+    fontFamily: 'RemixIcon',
+  );
+  static const IconData swap_vert = Symbols.swap_vert;
+  static const IconData task_alt = Symbols.task_alt;
+  static const IconData swap_vert_outlined = Symbols.swap_vert;
+  static const IconData swap_vertical_circle = Symbols.swap_vertical_circle;
+  static const IconData swipe = Symbols.swipe;
+  static const IconData switch_account_outlined = Symbols.switch_account;
+  static const IconData sync = Symbols.sync;
+  static const IconData system_update = Symbols.system_update;
+  static const IconData table_chart_outlined = Symbols.table_chart;
+  static const IconData text_snippet = Symbols.text_snippet;
+  static const IconData timer_outlined = Symbols.timer;
+  static const IconData translate = Symbols.translate;
+  static const IconData tune = Symbols.tune;
+  static const IconData trackpad_input = Symbols.trackpad_input;
+  static const IconData upload = Symbols.upload;
+  static const IconData upload_file = Symbols.upload_file;
+  static const IconData upload_file_outlined = Symbols.upload_file;
+  static const IconData upload_outlined = Symbols.upload;
+  static const IconData update = Symbols.update;
+  static const IconData user_attributes = Symbols.user_attributes;
+  static const IconData warning_outlined = Symbols.warning;
+  static const IconData vertical_align_bottom = Symbols.vertical_align_bottom;
+  static const IconData vertical_align_top = Symbols.vertical_align_top;
+  static const IconData view_cozy = Symbols.view_cozy;
+  static const IconData visibility = Symbols.visibility;
+  static const IconData visibility_off = Symbols.visibility_off;
+  static const IconData view_list = Symbols.view_list;
+  static const IconData wifi_off = Symbols.wifi_off;
+  static const IconData window_outlined = Symbols.window;
+}

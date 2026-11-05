@@ -1,0 +1,2701 @@
+// ignore: unused_import
+import 'package:intl/intl.dart' as intl;
+
+import 'app_localizations.dart';
+
+// ignore_for_file: type=lint
+
+/// The translations for English (`en`).
+class AppLocalizationsEn extends AppLocalizations {
+  AppLocalizationsEn([String locale = 'en']) : super(locale);
+
+  @override
+  String get copiedToClipboard => 'Copied to clipboard';
+
+  @override
+  String get resolvingDownload => 'Resolving download link…';
+
+  @override
+  String get addedToQueue => 'Added to the download queue';
+
+  @override
+  String get shareNeedsPassword => 'This share requires a password';
+
+  @override
+  String get wrongPassword => 'Incorrect password';
+
+  @override
+  String get lanzouInvalidResponse => 'Invalid response from the server';
+
+  @override
+  String get lanzouCreateFolderFailed => 'Failed to create folder';
+
+  @override
+  String get lanzouDeleteFailed => 'Delete failed';
+
+  @override
+  String get lanzouMoveFileFailed => 'Failed to move file';
+
+  @override
+  String get lanzouMoveToCurrentFolder => 'Cannot move to the current folder';
+
+  @override
+  String get lanzouMoveFolderWithSubfoldersUnsupported =>
+      'Moving folders that contain subfolders is not supported yet';
+
+  @override
+  String get lanzouReadFolderInfoFailed => 'Unable to read folder information';
+
+  @override
+  String get lanzouSameTargetFolder =>
+      'The source and destination are the same';
+
+  @override
+  String get lanzouUpdateDescriptionFailed =>
+      'Failed to update the description';
+
+  @override
+  String get lanzouFileNameRequired => 'File name cannot be empty';
+
+  @override
+  String get lanzouRenameRequiresMembership =>
+      'Rename failed: This feature requires a membership';
+
+  @override
+  String get lanzouUpdateFilePasswordFailed =>
+      'Failed to update the access password';
+
+  @override
+  String get lanzouFolderNameRequired => 'Folder name cannot be empty';
+
+  @override
+  String get lanzouUpdateFolderInfoFailed =>
+      'Failed to save folder information';
+
+  @override
+  String get lanzouUpdateFolderPasswordFailed =>
+      'Failed to update the folder access password';
+
+  @override
+  String get lanzouUploadContentMissing => 'No file content to upload';
+
+  @override
+  String lanzouUploadFailed(String detail) {
+    return 'Upload failed: $detail';
+  }
+
+  @override
+  String get lanzouUnknownError => 'Unknown error';
+
+  @override
+  String get lanzouFileShareInfoFailed =>
+      'Unable to get share information for this file';
+
+  @override
+  String get lanzouFolderShareInfoFailed =>
+      'Failed to get folder share information';
+
+  @override
+  String lanzouResolveShareFailed(String detail) {
+    return 'Failed to resolve share: $detail';
+  }
+
+  @override
+  String get lanzouFileShareUnavailable =>
+      'The file does not exist or sharing has ended';
+
+  @override
+  String get lanzouPasswordParameterParseFailed =>
+      'Failed to parse the password parameters';
+
+  @override
+  String get lanzouDownloadParameterParseFailed =>
+      'Failed to parse the download parameters';
+
+  @override
+  String lanzouDownloadUrlFailed(String detail) {
+    return 'Failed to get the download link: $detail';
+  }
+
+  @override
+  String get lanzouDirectLinkMissing => 'Direct download link not found';
+
+  @override
+  String get lanzouFolderShareUnavailable =>
+      'The folder does not exist or sharing has ended';
+
+  @override
+  String get lanzouSharePageParseFailed => 'Failed to parse the share page';
+
+  @override
+  String get lanzouShareFileListFailed => 'Failed to load the shared file list';
+
+  @override
+  String resolveFailed(String error) {
+    return 'Failed to resolve: $error';
+  }
+
+  @override
+  String get tabHome => 'Home';
+
+  @override
+  String get tabDrive => 'Drive';
+
+  @override
+  String get tabTransfers => 'Transfers';
+
+  @override
+  String get tabProfile => 'Profile';
+
+  @override
+  String get exitTitle => 'Transfers still running';
+
+  @override
+  String exitMessage(int count) {
+    return 'There are $count transfers in progress. Exiting will cancel them. Exit anyway?';
+  }
+
+  @override
+  String get keepTransferring => 'Keep running';
+
+  @override
+  String get exitAndCancel => 'Exit and cancel';
+
+  @override
+  String get download => 'Download';
+
+  @override
+  String get copyLink => 'Copy link';
+
+  @override
+  String linkWithPassword(String url, String pwd) {
+    return '$url Password: $pwd';
+  }
+
+  @override
+  String get notLoggedIn => 'Not logged in';
+
+  @override
+  String accountUid(String uid) {
+    return '$uid';
+  }
+
+  @override
+  String get accountTitle => 'Account';
+
+  @override
+  String get openShareLink => 'Open share link';
+
+  @override
+  String transferringCount(int count) {
+    return 'Transferring $count';
+  }
+
+  @override
+  String get transferCenter => 'Transfers';
+
+  @override
+  String get quickAccess => 'Quick access';
+
+  @override
+  String get quickAccessHint => 'Pin frequently used drive folders here';
+
+  @override
+  String get recent => 'Recent';
+
+  @override
+  String get noRecent => 'No recent items yet';
+
+  @override
+  String get sharedContent => 'Shared content';
+
+  @override
+  String get myDrive => 'My drive';
+
+  @override
+  String get myFavorites => 'Favorites';
+
+  @override
+  String get favoritesHint => 'No favorites yet';
+
+  @override
+  String get favoriteFolders => 'Folders';
+
+  @override
+  String get favoriteFiles => 'Files';
+
+  @override
+  String get favoriteDeleteConfirmTitle => 'Delete favorites';
+
+  @override
+  String favoriteDeleteConfirmMessage(int count) {
+    return 'Remove $count selected favorites?';
+  }
+
+  @override
+  String get unfavorite => 'Remove favorite';
+
+  @override
+  String get addAccount => 'Add account';
+
+  @override
+  String get lanCloudSubtitle => 'Third-party LanZou Cloud client';
+
+  @override
+  String get howToGetCookie => 'How to get your cookie';
+
+  @override
+  String get cookieSteps =>
+      '1. Open and log in to the LanZou Cloud website in a browser\n2. Press F12 to open DevTools and go to the Network panel\n3. Click any request and find the Cookie in Request Headers\n4. Copy the entire value (it must include ylogin and phpdisk_info)';
+
+  @override
+  String get webLoginRecommended => 'Web login (recommended)';
+
+  @override
+  String get orPasteCookie => 'Or paste your cookie manually';
+
+  @override
+  String get lanzouCookie => 'LanZou Cloud cookie';
+
+  @override
+  String get cookieHint => 'ylogin=1234567; phpdisk_info=xxxxxx...';
+
+  @override
+  String get verifying => 'Verifying…';
+
+  @override
+  String get saveAndLogin => 'Save and log in';
+
+  @override
+  String get cookiePrivacy =>
+      'The cookie is stored only on this device (encrypted system storage) and is never uploaded to any third-party server.';
+
+  @override
+  String get pleasePasteCookie => 'Paste your cookie first';
+
+  @override
+  String get cookieMissingYlogin =>
+      'No ylogin field found. Make sure you copied the complete cookie.';
+
+  @override
+  String get cookieInvalid =>
+      'The cookie is invalid or expired. Please get a new one.';
+
+  @override
+  String get webLogin => 'Web login';
+
+  @override
+  String get checking => 'Checking…';
+
+  @override
+  String get finishLogin => 'Finish login';
+
+  @override
+  String get webLoginGuide =>
+      'Log in with your LanZou Cloud account and complete the slider check if prompted. The account is saved automatically once you reach the drive page.';
+
+  @override
+  String get noLoginDetected =>
+      'No login detected yet. Complete login in the page above first.';
+
+  @override
+  String get my => 'Profile';
+
+  @override
+  String uidLabel(String uid) {
+    return 'UID: $uid';
+  }
+
+  @override
+  String get switchAccountShort => 'Switch';
+
+  @override
+  String get switchAccount => 'Switch account';
+
+  @override
+  String get removeCurrentAccount => 'Remove current account';
+
+  @override
+  String get accountManagement => 'Account management';
+
+  @override
+  String get appSection => 'App';
+
+  @override
+  String get settings => 'Settings';
+
+  @override
+  String get settingsSubtitle =>
+      'Appearance, behavior, connections and advanced overrides';
+
+  @override
+  String get webManagement => 'Web version';
+
+  @override
+  String get webManagementSubtitle =>
+      'Official features like changing your password or avatar';
+
+  @override
+  String get userCenter => 'Personal center';
+
+  @override
+  String get recycleBin => 'Recycle bin';
+
+  @override
+  String get removeAccountTitle => 'Remove account';
+
+  @override
+  String removeAccountMessage(String uid) {
+    return 'This removes account $uid and its login info from this device. Files in the cloud are unaffected.';
+  }
+
+  @override
+  String get clearUsageData => 'Clear usage data';
+
+  @override
+  String get clearUsageDataSubtitle =>
+      'Removes data related to this account, such as quick access and recent items';
+
+  @override
+  String get cancel => 'Cancel';
+
+  @override
+  String get remove => 'Remove';
+
+  @override
+  String get clear => 'Clear';
+
+  @override
+  String get transfers => 'Transfers';
+
+  @override
+  String get clearFinished => 'Clear finished';
+
+  @override
+  String get clearFinishedConfirmTitle => 'Clear finished records';
+
+  @override
+  String get clearFinishedConfirmMessage =>
+      'This will clear finished transfer records. Continue?';
+
+  @override
+  String get cancelAll => 'Cancel all';
+
+  @override
+  String get pauseAll => 'Pause all';
+
+  @override
+  String get resumeAll => 'Resume all';
+
+  @override
+  String get clearAll => 'Clear';
+
+  @override
+  String get cancelInProgressTransfers => 'Cancel in-progress transfers';
+
+  @override
+  String cancelAllUploadsConfirmMessage(int count) {
+    return 'Cancel and remove all $count in-progress uploads?';
+  }
+
+  @override
+  String cancelAllDownloadsConfirmMessage(int count) {
+    return 'Cancel and remove all $count in-progress downloads and delete downloaded files?';
+  }
+
+  @override
+  String get clearFinishedTransfers => 'Clear finished transfers';
+
+  @override
+  String clearFinishedUploadsConfirmMessage(int count) {
+    return 'Clear all $count finished upload records?';
+  }
+
+  @override
+  String clearFinishedDownloadsConfirmMessage(int count) {
+    return 'Clear all $count finished download records?';
+  }
+
+  @override
+  String resumeAllPartialFailed(int count) {
+    return '$count downloads could not be resumed. Please try again later.';
+  }
+
+  @override
+  String get upload => 'Upload';
+
+  @override
+  String get noUploads => 'No upload tasks';
+
+  @override
+  String get noDownloads => 'No download tasks';
+
+  @override
+  String get inProgress => 'In progress';
+
+  @override
+  String get finished => 'Finished';
+
+  @override
+  String get queued => 'Queued';
+
+  @override
+  String get uploading => 'Uploading';
+
+  @override
+  String get downloading => 'Downloading';
+
+  @override
+  String get resumingDownload => 'Resuming';
+
+  @override
+  String get paused => 'Paused';
+
+  @override
+  String get saving => 'Saving';
+
+  @override
+  String get pauseDownload => 'Pause download';
+
+  @override
+  String get resumeDownload => 'Resume download';
+
+  @override
+  String get completed => 'Completed';
+
+  @override
+  String failedWithError(String error) {
+    return 'Failed: $error';
+  }
+
+  @override
+  String get unknownError => 'Unknown error';
+
+  @override
+  String get canceled => 'Canceled';
+
+  @override
+  String get unknownSize => 'Unknown size';
+
+  @override
+  String get retry => 'Retry';
+
+  @override
+  String get cancelTask => 'Cancel task';
+
+  @override
+  String get cancelDownload => 'Cancel download';
+
+  @override
+  String get openFileFailed => 'No app can open this file';
+
+  @override
+  String get openFileMissing => 'The file no longer exists or has been moved';
+
+  @override
+  String get openFilePermissionDenied =>
+      'File access is no longer permitted. Choosing a download directory only affects future tasks; please download this file again.';
+
+  @override
+  String get openFileSystemError =>
+      'The system could not open this file. Please try again later.';
+
+  @override
+  String get redownload => 'Download again';
+
+  @override
+  String get deleteDownloadRecord => 'Delete download record';
+
+  @override
+  String get waitingToDownload => 'Waiting';
+
+  @override
+  String get downloadFailed => 'Download failed';
+
+  @override
+  String get batchRetry => 'Retry all';
+
+  @override
+  String get taskInterrupted => 'The app exited and interrupted this task';
+
+  @override
+  String get retryUnavailable =>
+      'The app has restarted; please start the download again';
+
+  @override
+  String get retryUploadUnavailable =>
+      'This upload can\'t continue after an app restart; please upload again';
+
+  @override
+  String get retryUploadFileGone =>
+      'The source file is gone; please pick the file again';
+
+  @override
+  String get uploadNeedLogin => 'Please sign in before uploading';
+
+  @override
+  String get retryResolving => 'Re-resolving the download link…';
+
+  @override
+  String retryResolveFailed(String error) {
+    return 'Failed to re-resolve the download link: $error';
+  }
+
+  @override
+  String get networkError => 'Network error';
+
+  @override
+  String networkErrorHttp(int status) {
+    return 'Network error (HTTP $status)';
+  }
+
+  @override
+  String get downloadBlocked => 'Download was blocked; please try again later';
+
+  @override
+  String get open => 'Open';
+
+  @override
+  String get view => 'View';
+
+  @override
+  String get pleasePasteShareLink => 'Paste a LanZou Cloud share link first';
+
+  @override
+  String get shareLinkFormatError => 'Invalid share link';
+
+  @override
+  String get addedToFavorites => 'Added to favorites';
+
+  @override
+  String get openShare => 'Open share';
+
+  @override
+  String get shareLink => 'Share link';
+
+  @override
+  String get shareLinkHint => 'https://www.lanzou.com/xxxxx';
+
+  @override
+  String get passwordOptional => 'Password (if any)';
+
+  @override
+  String get folderNeedsPassword => 'This folder needs a password';
+
+  @override
+  String get fileNeedsPassword => 'This file needs a password';
+
+  @override
+  String get passwordFieldLabel => 'Password';
+
+  @override
+  String get passwordRequired => 'Enter the password';
+
+  @override
+  String get resolving => 'Resolving…';
+
+  @override
+  String get resolve => 'Resolve';
+
+  @override
+  String sizeLabel(String size) {
+    return 'Size: $size';
+  }
+
+  @override
+  String get favorite => 'Favorite';
+
+  @override
+  String get shareEmpty => 'This share contains no files';
+
+  @override
+  String get language => 'Language';
+
+  @override
+  String get followSystem => 'Follow system';
+
+  @override
+  String get system => 'System';
+
+  @override
+  String get chinese => '简体中文';
+
+  @override
+  String get english => 'English';
+
+  @override
+  String get themeMode => 'Theme mode';
+
+  @override
+  String get light => 'Light';
+
+  @override
+  String get dark => 'Dark';
+
+  @override
+  String get themeModeKeywords => 'theme night dark light';
+
+  @override
+  String get oled => 'Pure black theme';
+
+  @override
+  String get oledSubtitle =>
+      'Pure black background in dark mode to save battery';
+
+  @override
+  String get oledKeywords => 'black battery oled';
+
+  @override
+  String get themeColor => 'Theme color';
+
+  @override
+  String get themeSeedDynamicHint => 'Has no effect while dynamic color is on';
+
+  @override
+  String get themeColorKeywords => 'accent color theme';
+
+  @override
+  String get classicBlue => 'Default blue';
+
+  @override
+  String get teal => 'Teal';
+
+  @override
+  String get violet => 'Violet';
+
+  @override
+  String get vermilion => 'Vermilion';
+
+  @override
+  String get olive => 'Olive green';
+
+  @override
+  String get custom => 'Custom';
+
+  @override
+  String get colorMd3Purple => 'Classic purple';
+
+  @override
+  String get colorRoyalBlue => 'Royal blue';
+
+  @override
+  String get colorRose => 'Rose';
+
+  @override
+  String get colorAmber => 'Amber';
+
+  @override
+  String get hideTopBar => 'Collapse top bar on scroll';
+
+  @override
+  String get hideTopBarKeywords => 'top bar hide on scroll collapse';
+
+  @override
+  String get hideBottomBar => 'Collapse bottom bar on scroll';
+
+  @override
+  String get hideBottomBarKeywords => 'bottom bar hide on scroll collapse';
+
+  @override
+  String get floatingNav => 'Floating nav bar';
+
+  @override
+  String get floatingNavSubtitle =>
+      'Rounded with a shadow, floating above content';
+
+  @override
+  String get floatingNavKeywords => 'bottom bar floating md3';
+
+  @override
+  String get navBarItems => 'Bottom bar items';
+
+  @override
+  String get navBarItemsHint =>
+      'Unchecked views stay hidden from the bottom bar and remain reachable from the home quick actions';
+
+  @override
+  String get navBarItemsKeywords =>
+      'bottom bar items transfers favorites customize';
+
+  @override
+  String get swipeTabs => 'Swipe to switch views';
+
+  @override
+  String get swipeTabsSubtitle => 'Swipe left or right to switch home views';
+
+  @override
+  String get swipeTabsKeywords => 'swipe gesture tab';
+
+  @override
+  String get transitionAnimations => 'Directory transition animation';
+
+  @override
+  String get transitionAnimationsSubtitle =>
+      'Fade-in animation when switching folders';
+
+  @override
+  String get transitionAnimationsKeywords =>
+      'animation transition fade folder list';
+
+  @override
+  String get downloadDir => 'Download folder';
+
+  @override
+  String defaultDownloadDir(String path) {
+    return 'Default ($path)';
+  }
+
+  @override
+  String get downloadDirKeywords => 'download folder save location';
+
+  @override
+  String get launchPage => 'Default start page';
+
+  @override
+  String get launchPageKeywords => 'start home drive';
+
+  @override
+  String get homeFolderOpen => 'Open home folders in';
+
+  @override
+  String get homeFolderOpenKeywords => 'home folder open mode page drive';
+
+  @override
+  String get openInNewPage => 'New page';
+
+  @override
+  String get openInDriveTab => 'Drive tab';
+
+  @override
+  String get cacheFolders => 'Cache folder data';
+
+  @override
+  String get cacheFoldersSubtitle => 'Don\'t reload when going back a level';
+
+  @override
+  String get cacheFoldersKeywords => 'cache folder';
+
+  @override
+  String get loadAllPages => 'Auto-load all folder contents';
+
+  @override
+  String get loadAllPagesSubtitle =>
+      'When off, load page by page and fetch the next page at the bottom';
+
+  @override
+  String get loadAllPagesKeywords => 'pagination load folder';
+
+  @override
+  String get requestInterval => 'Request interval';
+
+  @override
+  String requestIntervalSubtitle(int ms) {
+    return '$ms ms';
+  }
+
+  @override
+  String get requestIntervalHint =>
+      'Too small an interval may trigger server rate limiting';
+
+  @override
+  String get requestIntervalKeywords =>
+      'interval rate limit throttling request';
+
+  @override
+  String get maxUploads => 'Concurrent uploads';
+
+  @override
+  String get uploadKeywords => 'upload concurrent';
+
+  @override
+  String get maxDownloads => 'Concurrent downloads';
+
+  @override
+  String get downloadKeywords => 'download concurrent';
+
+  @override
+  String get singleFileDownloadConnections => 'Max download threads';
+
+  @override
+  String get singleFileDownloadConnectionsKeywords =>
+      'multi-thread segmented single-file connection parallel download speed';
+
+  @override
+  String get singleFileDownloadConnectionsSubtitle =>
+      'More threads increase rate-limit and data-usage risks';
+
+  @override
+  String get apiHost => 'Drive API domain';
+
+  @override
+  String get apiHostKeywords => 'domain api connection error pc up';
+
+  @override
+  String get uploadPath => 'Upload endpoint path';
+
+  @override
+  String get uploadPathKeywords =>
+      'upload endpoint path domain up html5up fileup';
+
+  @override
+  String get userAgent => 'Custom User-Agent';
+
+  @override
+  String get defaultUserAgent => 'Default (desktop browser emulation)';
+
+  @override
+  String get userAgentKeywords => 'ua user-agent browser';
+
+  @override
+  String get advanced => 'Advanced overrides';
+
+  @override
+  String get advancedSubtitle => 'API/upload endpoint paths and custom UA';
+
+  @override
+  String get advancedHint =>
+      'Normally you shouldn\'t change these options; doing so may break related features';
+
+  @override
+  String get clearData => 'Clear data';
+
+  @override
+  String get clearDataKeywords =>
+      'clear data quick access recent logs registry';
+
+  @override
+  String get clearDataGroupAccount => 'This account';
+
+  @override
+  String get clearDataGroupOthers => 'Other data';
+
+  @override
+  String get clearDataOtherAccounts => 'Other accounts\' data';
+
+  @override
+  String get clearDataOtherAccountsSubtitle =>
+      'Data related to other accounts, such as quick access and recent items';
+
+  @override
+  String get clearDataLogs => 'App logs';
+
+  @override
+  String get clearDataRegistry => 'Registry entry';
+
+  @override
+  String get clearDataRegistrySubtitle =>
+      'Registry entry created to show the app icon in system notifications';
+
+  @override
+  String get clearCache => 'Clear cache';
+
+  @override
+  String get clearCacheSubtitle =>
+      'Remove temporary files and image cache; account data and downloaded files are kept';
+
+  @override
+  String get clearCacheKeywords => 'cache clear storage temporary';
+
+  @override
+  String clearCacheBody(String size) {
+    return 'Currently using $size. Temporary files, the image cache and folder listings will be removed; account data, settings and downloaded files are kept.';
+  }
+
+  @override
+  String get clearCacheBodyUnknown =>
+      'Temporary files, the image cache and folder listings will be removed; account data, settings and downloaded files are kept.';
+
+  @override
+  String get clean => 'Clean';
+
+  @override
+  String cacheCleared(String size) {
+    return 'Freed $size';
+  }
+
+  @override
+  String get about => 'About';
+
+  @override
+  String get aboutSubtitle => 'LanCloud · Third-party LanZou Cloud client';
+
+  @override
+  String get aboutKeywords => 'version about open source license';
+
+  @override
+  String get aboutText =>
+      'A personal third-party LanZou Cloud client based on unofficial APIs. Please don\'t redistribute it or use it commercially.';
+
+  @override
+  String get searchSettings => 'Search settings';
+
+  @override
+  String get closeSearch => 'Close search';
+
+  @override
+  String get searchPlaceholder =>
+      'Search settings, e.g. domain, collapse, download, concurrency';
+
+  @override
+  String get noMatch => 'No matching settings';
+
+  @override
+  String get searchOtherSettings => 'Other settings';
+
+  @override
+  String get cleared => 'Cleared';
+
+  @override
+  String get clearDataNothingSelected => 'Nothing selected to clear';
+
+  @override
+  String get restoredDefaultDir => 'Restored the default folder';
+
+  @override
+  String get restoreDefault => 'Restore default';
+
+  @override
+  String get change => 'Change';
+
+  @override
+  String downloadDirSet(String dir) {
+    return 'Download folder set to $dir';
+  }
+
+  @override
+  String pickDirFailed(String error) {
+    return 'Failed to pick a folder: $error';
+  }
+
+  @override
+  String privateDownloadDir(String path) {
+    return 'Private folder ($path)';
+  }
+
+  @override
+  String publicDownloadDir(String path) {
+    return 'Public folder ($path)';
+  }
+
+  @override
+  String customDownloadDir(String path) {
+    return 'Non-public folder ($path)';
+  }
+
+  @override
+  String get downloadDirHint =>
+      'On Android 10 and newer, downloads are saved to the public Download/LanCloud folder by default without storage permission or folder authorization. Android 9 and older still use the app\'s private folder due to system restrictions. To change the location, prefer a public system folder; non-public folders require authorization and are written after the download finishes.';
+
+  @override
+  String get safDirPermissionLost =>
+      'Access to the download folder expired; please pick it again in Settings';
+
+  @override
+  String safExportFailed(String error) {
+    return 'Failed to write into the download folder: $error';
+  }
+
+  @override
+  String get noInterval => 'No delay';
+
+  @override
+  String get save => 'Save';
+
+  @override
+  String get saveAs {
+    return 'Save to…';
+  }
+
+  @override
+  String saveAsDone(String path) {
+    return 'Saved to $path';
+  }
+
+  @override
+  String saveFailed(String message) {
+    return 'Save failed: $message';
+  }
+
+  @override
+  String get tabWenshu {
+    return 'Wenshu';
+  }
+
+  @override
+  String get wenshuTitle {
+    return 'Wenshu Transfer';
+  }
+
+  @override
+  String get wenshuDesc {
+    return 'Send and receive files through the official Wenshu pages.';
+  }
+
+  @override
+  String get wenshuSend {
+    return 'Send files';
+  }
+
+  @override
+  String get wenshuSendHint {
+    return 'Upload a file and get a pickup link';
+  }
+
+  @override
+  String get wenshuReceive {
+    return 'Receive files';
+  }
+
+  @override
+  String get wenshuReceiveHint {
+    return 'Enter a pickup code or link';
+  }
+
+  @override
+  String get wenshuOpenWeb {
+    return 'Open in browser';
+  }
+
+  @override
+  String get renameTask {
+    return 'Rename';
+  }
+
+  @override
+  String get renameTaskHint {
+    return 'You can rename before the transfer starts';
+  }
+
+  @override
+  String get renameTaskLocked {
+    return 'The transfer has started; cannot rename';
+  }
+
+  @override
+  String get editProfile {
+    return 'Edit profile';
+  }
+
+  @override
+  String get changeAvatar {
+    return 'Change avatar';
+  }
+
+  @override
+  String get removeAvatar {
+    return 'Reset avatar';
+  }
+
+  @override
+  String get changeNickname {
+    return 'Change name';
+  }
+
+  @override
+  String get nicknameHint {
+    return 'Shown only on this device; the Lanzou name is unchanged';
+  }
+
+  @override
+  String get avatarUpdated {
+    return 'Avatar updated';
+  }
+
+  @override
+  String get nicknameUpdated {
+    return 'Name updated';
+  }
+
+  @override
+  String get avatarRestored {
+    return 'Avatar reset';
+  }
+
+  @override
+  String get reset => 'Reset';
+
+  @override
+  String get userAgentHint => 'Leave empty to use the default value';
+
+  @override
+  String get categoryAppearance => 'Appearance';
+
+  @override
+  String get categoryBehavior => 'Behavior';
+
+  @override
+  String get categoryConnection => 'Connection';
+
+  @override
+  String get categoryAdvanced => 'Advanced overrides';
+
+  @override
+  String get categoryData => 'Data';
+
+  @override
+  String get categoryAppearanceLayout => 'Appearance & layout';
+
+  @override
+  String get categoryBehaviorPermissions => 'Behavior & permissions';
+
+  @override
+  String get categoryNotificationsReminders => 'Notifications & reminders';
+
+  @override
+  String get categoryTransferConnection => 'Transfers & connection';
+
+  @override
+  String get categoryPrivacyData => 'Privacy & data';
+
+  @override
+  String get sectionLayout => 'Layout';
+
+  @override
+  String get sectionReminder => 'Reminders';
+
+  @override
+  String get sectionDownload => 'Downloads';
+
+  @override
+  String get sectionUpload => 'Uploads';
+
+  @override
+  String get exitSelection => 'Exit selection';
+
+  @override
+  String selectedCount(int count) {
+    return '$count selected';
+  }
+
+  @override
+  String get selectAll => 'Select all';
+
+  @override
+  String get invertSelection => 'Invert selection';
+
+  @override
+  String get newFolder => 'New folder';
+
+  @override
+  String get uploadFile => 'Upload files';
+
+  @override
+  String get uploadFileSubtitle => 'Pick files from this device or other apps';
+
+  @override
+  String uploadSkipped(int added, int skipped) {
+    return 'Added $added upload tasks and skipped $skipped files larger than 100 MB';
+  }
+
+  @override
+  String uploadAdded(int count) {
+    return 'Added $count upload tasks';
+  }
+
+  @override
+  String get nameLabel => 'Name';
+
+  @override
+  String get nameLabelMember => 'Name (membership required to rename)';
+
+  @override
+  String get pleaseEnterName => 'Enter a name';
+
+  @override
+  String get descOptional => 'Description (optional)';
+
+  @override
+  String get create => 'Create';
+
+  @override
+  String get folderNameRequired => 'Folder name cannot be empty';
+
+  @override
+  String get nameRequired => 'Name cannot be empty';
+
+  @override
+  String get deleteConfirmTitle => 'Confirm deletion';
+
+  @override
+  String deleteConfirmMessage(int count) {
+    return 'Move $count selected items to the recycle bin?';
+  }
+
+  @override
+  String deleteConfirmSingle(String name) {
+    return 'Move \"$name\" to the recycle bin?';
+  }
+
+  @override
+  String get deleteRecord => 'Remove this record';
+
+  @override
+  String get delete => 'Delete';
+
+  @override
+  String get folderInfo => 'Edit info';
+
+  @override
+  String get folderInfoSubtitle => 'Change name and description';
+
+  @override
+  String get accessPassword => 'Access password';
+
+  @override
+  String get accessPasswordSubtitle => 'Set or disable the access password';
+
+  @override
+  String get folderPassword => 'Folder password';
+
+  @override
+  String get filePassword => 'File password';
+
+  @override
+  String get enablePassword => 'Enable access password';
+
+  @override
+  String get folderInfoSaved => 'Folder info updated';
+
+  @override
+  String get itemInfoSaved => 'Info updated';
+
+  @override
+  String get passwordCleared => 'Access password disabled';
+
+  @override
+  String passwordClearedCount(int count) {
+    return 'Disabled access password for $count items';
+  }
+
+  @override
+  String get transferDeleteConfirmTitle => 'Delete transfer records';
+
+  @override
+  String transferDeleteConfirmMessage(int count) {
+    return 'Remove $count selected records (running ones will be canceled)?';
+  }
+
+  @override
+  String get batchDownload => 'Batch download';
+
+  @override
+  String resolvingBatch(int count) {
+    return 'Resolving and adding to the download queue ($count total)';
+  }
+
+  @override
+  String addedDownloads(int count) {
+    return 'Added $count download tasks';
+  }
+
+  @override
+  String addedDownloadsPartial(int ok, int failed) {
+    return 'Added $ok download tasks; $failed failed to resolve';
+  }
+
+  @override
+  String addedDownloadsSkipped(int ok, int skipped) {
+    return 'Added $ok download tasks; skipped $skipped files already in the transfer list';
+  }
+
+  @override
+  String addedDownloadsPartialSkipped(int ok, int skipped, int failed) {
+    return 'Added $ok download tasks; skipped $skipped files already in the transfer list; $failed failed to resolve';
+  }
+
+  @override
+  String retriedDownloads(int count) {
+    return 'Re-queued $count download tasks';
+  }
+
+  @override
+  String retriedDownloadsPartial(int ok, int failed) {
+    return 'Re-queued $ok download tasks; $failed failed';
+  }
+
+  @override
+  String get noLinksToCopy => 'No share links to copy';
+
+  @override
+  String passwordLabel(String pwd) {
+    return 'Password: $pwd';
+  }
+
+  @override
+  String favoritedCount(int count) {
+    return 'Favorited $count items';
+  }
+
+  @override
+  String get move => 'Move';
+
+  @override
+  String get moveSubtitle => 'Move selected files/folders to another folder';
+
+  @override
+  String get editDesc => 'Edit description';
+
+  @override
+  String get editDescBatchSubtitle =>
+      'Set the description for selected files/folders';
+
+  @override
+  String get setPassword => 'Set access password';
+
+  @override
+  String get setPasswordSubtitle =>
+      'Set access passwords for selected items; free accounts can only set, not remove';
+
+  @override
+  String movedTo(int count, String name) {
+    return 'Moved $count items to “$name”';
+  }
+
+  @override
+  String movedPartial(int ok, int failed) {
+    return 'Moved $ok items; $failed failed';
+  }
+
+  @override
+  String get newDescHint => 'Enter a new description';
+
+  @override
+  String get confirm => 'OK';
+
+  @override
+  String descUpdatedCount(int count) {
+    return 'Updated the description of $count items';
+  }
+
+  @override
+  String descUpdatedPartial(int ok, int failed) {
+    return 'Updated $ok; $failed failed';
+  }
+
+  @override
+  String get pwdHint => '2–6 character password';
+
+  @override
+  String get pwdHint12 => '2–12 character password';
+
+  @override
+  String get disablePasswordHint =>
+      'Disabling the access password requires membership';
+
+  @override
+  String get pwdTooShort => 'Password must be at least 2 characters';
+
+  @override
+  String passwordSetCount(int count) {
+    return 'Set passwords for $count items';
+  }
+
+  @override
+  String passwordSetPartial(int ok, int failed) {
+    return 'Set $ok; $failed failed';
+  }
+
+  @override
+  String get close => 'Close';
+
+  @override
+  String downloadsCount(int count) {
+    return '$count downloads';
+  }
+
+  @override
+  String get hasPassword => 'Has password';
+
+  @override
+  String get openLink => 'Open link';
+
+  @override
+  String get showQr => 'Show QR code';
+
+  @override
+  String get copyShareLink => 'Copy share link';
+
+  @override
+  String get copyDirectLink => 'Copy direct link';
+
+  @override
+  String get shareLinkQr => 'Share link QR code';
+
+  @override
+  String get directLinkQr => 'Direct link QR code';
+
+  @override
+  String get addFavorite => 'Add to favorites';
+
+  @override
+  String get newFavorite => 'New favorite';
+
+  @override
+  String get moreActions => 'More actions';
+
+  @override
+  String get freeAccountPasswordNote =>
+      'Free accounts can only set a password, not remove it';
+
+  @override
+  String get descUpdated => 'Description updated';
+
+  @override
+  String get passwordSet => 'Password set';
+
+  @override
+  String get favorited => 'Favorited';
+
+  @override
+  String get unfavorited => 'Removed from favorites';
+
+  @override
+  String get loading => 'Loading…';
+
+  @override
+  String get cleaning => 'Cleaning…';
+
+  @override
+  String get deleteRecordAndFile => 'Delete record and file';
+
+  @override
+  String get shareInfoUnavailable => 'Couldn\'t get share info';
+
+  @override
+  String get share => 'Share';
+
+  @override
+  String get openContainingFolder => 'Open containing folder';
+
+  @override
+  String get more => 'More';
+
+  @override
+  String get add => 'Add';
+
+  @override
+  String get searchCurrentFolder => 'Search this folder';
+
+  @override
+  String get searchFavorites => 'Search favorites';
+
+  @override
+  String get search => 'Search';
+
+  @override
+  String get menu => 'Menu';
+
+  @override
+  String get layout => 'Layout';
+
+  @override
+  String get grid => 'Grid';
+
+  @override
+  String get list => 'List';
+
+  @override
+  String get sort => 'Sort';
+
+  @override
+  String get sortName => 'Name';
+
+  @override
+  String get sortSize => 'Size';
+
+  @override
+  String get sortTime => 'Time';
+
+  @override
+  String get folderProperties => 'Folder details';
+
+  @override
+  String get properties => 'Properties';
+
+  @override
+  String get sortByName => 'Sort by name';
+
+  @override
+  String get sortBySize => 'Sort by size';
+
+  @override
+  String get sortByTime => 'Sort by time';
+
+  @override
+  String get toggleLayout => 'Toggle layout style';
+
+  @override
+  String get multiSelect => 'Select';
+
+  @override
+  String get refresh => 'Refresh';
+
+  @override
+  String get root => 'Root';
+
+  @override
+  String loadFailed(String error) {
+    return 'Failed to load: $error';
+  }
+
+  @override
+  String noMatchContent(String query) {
+    return 'Nothing matches “$query”';
+  }
+
+  @override
+  String get emptyFolder => 'This folder is empty';
+
+  @override
+  String get reachedEnd => 'All loaded';
+
+  @override
+  String get searchIncomplete =>
+      'Not all content is loaded; results may be incomplete';
+
+  @override
+  String get filterResult => 'Filtered results';
+
+  @override
+  String get folderActions => 'Folder actions';
+
+  @override
+  String get fileActions => 'File actions';
+
+  @override
+  String get downloaded => 'Added to downloads';
+
+  @override
+  String get folder => 'Folder';
+
+  @override
+  String fileCount(int count) {
+    return '$count files';
+  }
+
+  @override
+  String get openFolder => 'Open folder';
+
+  @override
+  String get chooseTargetFolder => 'Choose destination folder';
+
+  @override
+  String get parentFolder => 'Up one level';
+
+  @override
+  String get moveHere => 'Move here';
+
+  @override
+  String get noSubfolders => 'No subfolders in this folder';
+
+  @override
+  String get notifications => 'Notifications';
+
+  @override
+  String get notifProgress => 'Transfer progress';
+
+  @override
+  String get notifProgressSubtitle =>
+      'Show progress in the notification shade while transferring';
+
+  @override
+  String get notifProgressKeywords => 'notification progress transfer';
+
+  @override
+  String get notifDone => 'Transfer completion notifications';
+
+  @override
+  String get notifDoneSubtitle =>
+      'Notify when a download or upload finishes or fails';
+
+  @override
+  String get notifDoneKeywords => 'notification complete transfer alert';
+
+  @override
+  String get notifPermission => 'Notification permission';
+
+  @override
+  String get notifPermissionKeywords => 'notification permission allow';
+
+  @override
+  String get notifPermissionChecking => 'Checking…';
+
+  @override
+  String get notifPermissionGranted => 'Granted';
+
+  @override
+  String get notifPermissionDenied => 'Not granted';
+
+  @override
+  String get notifPermissionDeniedHint =>
+      'Notifications are disabled. Enable them in system settings.';
+
+  @override
+  String get managePermissions => 'Manage permissions';
+
+  @override
+  String get managePermissionsSubtitle =>
+      'Notifications, app installs, battery optimization';
+
+  @override
+  String get managePermissionsKeywords =>
+      'permission manage notifications install battery';
+
+  @override
+  String get notifProgressTitle => 'Transferring';
+
+  @override
+  String notifProgressBody(int count) {
+    return '$count tasks in progress';
+  }
+
+  @override
+  String get notifUploadDone => 'Upload complete';
+
+  @override
+  String get notifDownloadDone => 'Download complete';
+
+  @override
+  String get notifFailed => 'Transfer failed';
+
+  @override
+  String get notifChannelProgress => 'Transfer progress';
+
+  @override
+  String get notifChannelProgressDesc =>
+      'Progress of downloads and uploads in progress';
+
+  @override
+  String get notifChannelDone => 'Transfers finished';
+
+  @override
+  String get notifChannelDoneDesc =>
+      'Alerts when downloads and uploads finish or fail';
+
+  @override
+  String get files => 'Files';
+
+  @override
+  String get shareMessage => 'Message from the sharer';
+
+  @override
+  String favoritedPartial(int ok, int failed) {
+    return '$ok favorited, $failed failed';
+  }
+
+  @override
+  String get file => 'File';
+
+  @override
+  String sharerLabel(String name) {
+    return 'Shared by $name';
+  }
+
+  @override
+  String get editInfo => 'Edit info';
+
+  @override
+  String get favoriteTitle => 'Custom title';
+
+  @override
+  String get favoriteTitleHint => 'Leave empty to use the default name';
+
+  @override
+  String get shareInvalid =>
+      'This share is no longer available (canceled or deleted)';
+
+  @override
+  String get fileInvalid => 'This file is no longer available';
+
+  @override
+  String get logout => 'Log out';
+
+  @override
+  String get appName => 'LanCloud';
+
+  @override
+  String get appBuildDebug => 'Debug';
+
+  @override
+  String get appBuildProfile => 'Profile';
+
+  @override
+  String get appBuildRelease => 'Release';
+
+  @override
+  String shareReceivedFiles(int count) {
+    return 'Received $count files; starting upload';
+  }
+
+  @override
+  String get shareTargetUnsupported => 'Unrecognized shared content';
+
+  @override
+  String get uploadHere => 'Upload here';
+
+  @override
+  String get uploadFromApp => 'Upload from apps';
+
+  @override
+  String uploadTasksAdded(int count) {
+    return 'Added $count upload tasks';
+  }
+
+  @override
+  String get install => 'Install';
+
+  @override
+  String get addToQuickAccess => 'Add to quick access';
+
+  @override
+  String get removeFromQuickAccess => 'Remove from quick access';
+
+  @override
+  String get moveToTop => 'Move to top';
+
+  @override
+  String get expand => 'Expand';
+
+  @override
+  String get collapse => 'Collapse';
+
+  @override
+  String expandSection(String title) {
+    return 'Expand $title';
+  }
+
+  @override
+  String collapseSection(String title) {
+    return 'Collapse $title';
+  }
+
+  @override
+  String get enteredMultiSelect => 'Multi-select mode';
+
+  @override
+  String get copy => 'Copy';
+
+  @override
+  String get continueLabel => 'Continue';
+
+  @override
+  String get showCookie => 'Show cookie';
+
+  @override
+  String get showCookieSubtitle =>
+      'Requires biometric or screen-lock verification';
+
+  @override
+  String get cookieRiskTitle => 'Show cookie?';
+
+  @override
+  String get cookieRiskMessage =>
+      'The cookie is your account credential. Anyone who has it can sign in and operate your cloud drive. Don\'t screenshot, forward, or paste it into untrusted devices or apps.';
+
+  @override
+  String get cookieAuthReason => 'Verify your identity to continue';
+
+  @override
+  String get authVerifyTitle => 'Verify identity';
+
+  @override
+  String get authVerifyHint => 'Use your fingerprint or screen lock';
+
+  @override
+  String get cookieAuthFailed =>
+      'Verification failed; the cookie will not be shown';
+
+  @override
+  String get cookieAuthUnavailable =>
+      'No screen lock or biometrics is set up on this device, so identity can\'t be verified';
+
+  @override
+  String get cookieSheetTitle => 'Account cookie';
+
+  @override
+  String get cookieExport => 'Export';
+
+  @override
+  String get cookieExportFailed => 'Export failed';
+
+  @override
+  String get categoryPermissions => 'Permissions';
+
+  @override
+  String get categoryPrivacy => 'Privacy';
+
+  @override
+  String get showCookieKeywords => 'cookie show privacy credential key';
+
+  @override
+  String get exportLogs => 'Export runtime logs';
+
+  @override
+  String get exportLogsSubtitle =>
+      'Kept on this device, export only when reporting a problem';
+
+  @override
+  String get exportLogsKeywords => 'log export share debug feedback';
+
+  @override
+  String get exportLogsEmpty => 'No logs to export yet';
+
+  @override
+  String get exportLogsFailed => 'Failed to export logs';
+
+  @override
+  String exportLogsSaved(String path) {
+    return 'Saved to $path';
+  }
+
+  @override
+  String get scan => 'Scan QR code';
+
+  @override
+  String get scanButton => 'Scan QR';
+
+  @override
+  String get scanTakePhoto => 'Take a photo';
+
+  @override
+  String get scanTakePhotoSubtitle =>
+      'Use the system camera (no permission needed)';
+
+  @override
+  String get scanFromGallery => 'Choose from gallery';
+
+  @override
+  String get scanFromGallerySubtitle => 'Pick a QR image from the gallery';
+
+  @override
+  String get scanDecoding => 'Recognizing…';
+
+  @override
+  String get scanNoCameraApp => 'No camera app found';
+
+  @override
+  String get scanNoQrFound => 'No QR code found in the image';
+
+  @override
+  String get scanImageFailed => 'Failed to read the image';
+
+  @override
+  String get scanNotLanzou => 'No LanCloud share link found';
+
+  @override
+  String get dynamicColor => 'Dynamic color';
+
+  @override
+  String get dynamicColorSubtitle =>
+      'Use colors from the system wallpaper (Android 12+)';
+
+  @override
+  String get followSystemColorRestartHint =>
+      'Restart the app after changing the system theme color';
+
+  @override
+  String get dynamicColorUnsupported =>
+      'Dynamic color is not supported on this system';
+
+  @override
+  String get dynamicColorKeywords => 'dynamic color monet wallpaper theme';
+
+  @override
+  String get clipboardLinkPrompt => 'Detect clipboard links';
+
+  @override
+  String get clipboardLinkPromptSubtitle =>
+      'Prompt to open after copying a LanCloud share link';
+
+  @override
+  String get clipboardLinkPromptKeywords => 'clipboard copy link prompt';
+
+  @override
+  String get clipboardLinkFound => 'LanCloud share link detected';
+
+  @override
+  String get manageDefaultLinks => 'Manage default links';
+
+  @override
+  String get manageDefaultLinksSubtitle => 'Open share links with this app';
+
+  @override
+  String get manageDefaultLinksKeywords => 'default links open with permission';
+
+  @override
+  String get deleteFilesToo => 'Also delete the downloaded files';
+
+  @override
+  String get login => 'Sign in';
+
+  @override
+  String get startUsingTitle => 'Get started';
+
+  @override
+  String get startUsingSubtitle =>
+      'Sign in or restore your app data from an existing backup.';
+
+  @override
+  String get agreementConsentPrefix => 'I have read and agree to the ';
+
+  @override
+  String get agreementConjunction => ' and ';
+
+  @override
+  String get restoreGroupTitle => 'Restore';
+
+  @override
+  String get restoreExistingBackup => 'Restore from an existing backup';
+
+  @override
+  String get restoreIntro => 'Choose a backup source.';
+
+  @override
+  String get restoreLocalSource => 'Local backup file';
+
+  @override
+  String get restoreLocalSourceSubtitle =>
+      'Choose a previously exported JSON file';
+
+  @override
+  String get restoreCloudSource => 'WebDAV cloud';
+
+  @override
+  String get restoreCloudSourceSubtitle =>
+      'Connect to a server and choose a backup';
+
+  @override
+  String get restoreFileInvalid =>
+      'The backup could not be read or is not a valid UTF-8 JSON file';
+
+  @override
+  String get restorePreviewTitle => 'Review backup';
+
+  @override
+  String get restoreCreatedAtLabel => 'Created:';
+
+  @override
+  String restoreCreatedAt(String time) {
+    return 'Created: $time';
+  }
+
+  @override
+  String get restoreIncludedContent => 'Included content';
+
+  @override
+  String get restoreIncludedContentLabel => 'Included content:';
+
+  @override
+  String get restoreAccountLabel => 'Accounts:';
+
+  @override
+  String restoreAccountCount(int count) {
+    return 'Accounts: $count';
+  }
+
+  @override
+  String restoreAccountCountValue(int count) {
+    return '$count';
+  }
+
+  @override
+  String restoreUsingAccount(String name) {
+    return 'Sign in as $name after restoring';
+  }
+
+  @override
+  String get restoreLoginReady =>
+      'The saved sign-in state is valid and ready to restore.';
+
+  @override
+  String get restoreNoLoginCookie =>
+      'This backup has no sign-in credentials. You can sign in after restoring.';
+
+  @override
+  String get restoreLoginInvalid =>
+      'The saved sign-in state has expired. Other data can still be restored.';
+
+  @override
+  String get restoreLoginNetwork =>
+      'LanCloud could not be reached to verify sign-in. Retry or restore data only.';
+
+  @override
+  String get restoreLoginServer =>
+      'LanCloud is temporarily unavailable. Retry or restore data only.';
+
+  @override
+  String get restoreContainsCredentials =>
+      'This backup contains account credentials. Existing local sign-in state will be kept.';
+
+  @override
+  String get restoreNoCredentials =>
+      'This backup has no account credentials. Only the backed-up data will be restored.';
+
+  @override
+  String get restoreCheckAgain => 'Check again';
+
+  @override
+  String get restoreAndLogin => 'Restore and sign in';
+
+  @override
+  String get restoreOnlyData => 'Restore data only';
+
+  @override
+  String get restoreData => 'Restore data';
+
+  @override
+  String get restoreDataDone => 'Data restored. Continue by signing in.';
+
+  @override
+  String get restoreConnect => 'Connect and find backups';
+
+  @override
+  String get restoreChooseCopy => 'Choose a backup';
+
+  @override
+  String get webdavRestoreIntro =>
+      'Enter the WebDAV server details where the backup is stored.';
+
+  @override
+  String get restoreInsecureTitle => 'Insecure connection';
+
+  @override
+  String get restoreInsecureMessage => 'HTTPS is recommended. Continue anyway?';
+
+  @override
+  String get showPassword => 'Show password';
+
+  @override
+  String get hidePassword => 'Hide password';
+
+  @override
+  String get cookieLogin => 'Cookie login';
+
+  @override
+  String get permissionInstall => 'Install apps';
+
+  @override
+  String get permissionInstallKeywords =>
+      'install apk unknown sources permission';
+
+  @override
+  String get permissionBattery => 'Ignore battery optimization';
+
+  @override
+  String get permissionBatteryKeywords =>
+      'battery optimization background permission';
+
+  @override
+  String get permissionChecking => 'Checking…';
+
+  @override
+  String get permissionInstallGranted => 'Granted (for opening APKs)';
+
+  @override
+  String get permissionInstallDenied => 'Not granted (for opening APKs)';
+
+  @override
+  String get permissionBatteryGranted => 'Granted (for background transfers)';
+
+  @override
+  String get permissionBatteryRestricted =>
+      'Not granted (for background transfers)';
+
+  @override
+  String get permissionOpenFailed => 'Unable to open system settings';
+
+  @override
+  String get openSystemSettings => 'Open system settings';
+
+  @override
+  String get openSystemSettingsKeywords => 'system settings app info manage';
+
+  @override
+  String get backupAndRestore => 'Backup & restore';
+
+  @override
+  String get backupAndRestoreSubtitle => 'Local files and WebDAV';
+
+  @override
+  String get backupKeywords => 'backup restore webdav cookie export';
+
+  @override
+  String get localBackup => 'Local backup';
+
+  @override
+  String get backupNow => 'Back up now';
+
+  @override
+  String get backupNowSubtitle => 'Export a JSON backup file';
+
+  @override
+  String backupSaved(String path) {
+    return 'Saved to $path';
+  }
+
+  @override
+  String get restoreFromFile => 'Restore from file';
+
+  @override
+  String get restoreFromFileSubtitle => 'Pick a previously exported backup';
+
+  @override
+  String get chooseBackupFile => 'Choose backup file';
+
+  @override
+  String get backupContent => 'Backup content';
+
+  @override
+  String get backupOptions => 'Backup options';
+
+  @override
+  String get backupPageTitle => 'Backup';
+
+  @override
+  String get generatingBackup => 'Generating backup';
+
+  @override
+  String get backupSectionSettings => 'Settings';
+
+  @override
+  String get backupSectionFavorites => 'Favorites';
+
+  @override
+  String get backupSectionQuick => 'Quick access';
+
+  @override
+  String get backupSectionQuickHint => 'Quick access data for each account';
+
+  @override
+  String get backupSectionRecents => 'Recents';
+
+  @override
+  String get backupSectionRecentsHint => 'Recent data for each account';
+
+  @override
+  String get backupSectionCookies => 'Cookies';
+
+  @override
+  String get backupSectionCookiesHint =>
+      'Sensitive; equivalent to account sign-in credentials';
+
+  @override
+  String get backupSectionWebdavHint =>
+      'Sensitive; equivalent to WebDAV sign-in credentials';
+
+  @override
+  String get backupSectionEmpty => 'Nothing selected';
+
+  @override
+  String get backupProtectionTitle => 'Protect backup';
+
+  @override
+  String get backupProtectionIntro =>
+      'Encrypt the entire backup with a separate passphrase. It is never uploaded and cannot be recovered.';
+
+  @override
+  String get backupUseEncryption => 'Encrypt with a backup passphrase';
+
+  @override
+  String get backupPassphraseReminder =>
+      'Remember this password; without it, the backup cannot be restored';
+
+  @override
+  String get backupPassphrase => 'Backup passphrase';
+
+  @override
+  String get backupPassphraseHint => 'At least 8 characters';
+
+  @override
+  String get backupPassphraseRequired => 'Enter a backup passphrase';
+
+  @override
+  String get backupPassphraseTooShort => 'Use at least 8 characters';
+
+  @override
+  String get backupPassphraseMismatch => 'The backup passphrases do not match';
+
+  @override
+  String get backupEncryptionRequired =>
+      'Backups containing sign-in credentials or WebDAV passwords must be encrypted';
+
+  @override
+  String get backupEncryptionOff =>
+      'This backup will not be encrypted. Anyone who gets the file can read its contents.';
+
+  @override
+  String get backupUnlockTitle => 'Unlock encrypted backup';
+
+  @override
+  String get backupUnlockMessage =>
+      'Enter the backup passphrase used when this file was created.';
+
+  @override
+  String get backupUnlockAction => 'Unlock';
+
+  @override
+  String get backupPassphraseWrong =>
+      'The backup passphrase is incorrect or the file is damaged';
+
+  @override
+  String get restoreSensitiveAuthReason =>
+      'Verify your identity to use sign-in credentials from this backup';
+
+  @override
+  String get webdavSection => 'WebDAV';
+
+  @override
+  String get webdavAccount => 'WebDAV account';
+
+  @override
+  String get webdavServer => 'WebDAV URL';
+
+  @override
+  String get webdavServerHint => 'https://example.com/dav/';
+
+  @override
+  String get webdavUrlFormatError => 'Invalid WebDAV URL';
+
+  @override
+  String get pleaseEnterWebdavServer => 'Enter the WebDAV URL';
+
+  @override
+  String get webdavUsername => 'Username';
+
+  @override
+  String get webdavPassword => 'Password';
+
+  @override
+  String get webdavBackupPassphrase => 'Backup passphrase';
+
+  @override
+  String get webdavBackupPassphraseHint =>
+      'Used to encrypt cloud backups; changing it affects new backups only';
+
+  @override
+  String get webdavPath => 'Path';
+
+  @override
+  String get webdavPathHint => 'Backup folder under the server URL';
+
+  @override
+  String get pleaseEnterUsername => 'Enter the username';
+
+  @override
+  String get pleaseEnterPassword => 'Enter the password';
+
+  @override
+  String get pleaseEnterWebdavPath => 'Enter a path';
+
+  @override
+  String get webdavNotSet => 'Not set';
+
+  @override
+  String get webdavNotConfigured => 'WebDAV not configured';
+
+  @override
+  String get webdavBackupContentNotSelected => 'No backup content selected';
+
+  @override
+  String get webdavAccountIncomplete =>
+      'The WebDAV account is incomplete. Re-enter its connection details.';
+
+  @override
+  String get webdavBackup => 'Cloud backup';
+
+  @override
+  String get webdavTest => 'Test connection';
+
+  @override
+  String get webdavTestOk => 'Connected';
+
+  @override
+  String get webdavUpload => 'Upload backup';
+
+  @override
+  String webdavUploadDone(String name) {
+    return 'Uploaded $name';
+  }
+
+  @override
+  String get webdavRestore => 'Restore from cloud';
+
+  @override
+  String get webdavNoBackups => 'No backups in the cloud yet';
+
+  @override
+  String get selectRestoreVersion => 'Select a version to restore';
+
+  @override
+  String get restoreLatestTag => 'Latest';
+
+  @override
+  String get webdavAutoBackup => 'Auto backup';
+
+  @override
+  String get webdavAutoBackupSubtitle => 'Upload automatically at launch';
+
+  @override
+  String get webdavInterval => 'Backup frequency';
+
+  @override
+  String get webdavDaily => 'Daily';
+
+  @override
+  String get webdavWeekly => 'Weekly';
+
+  @override
+  String get secureStorageResetTitle => 'Sign in again';
+
+  @override
+  String get secureStorageResetMessage =>
+      'Secure storage was upgraded, so credentials saved by an older version could not be migrated. Favorites, settings, and local files remain; sign in again and re-enter the WebDAV password.';
+
+  @override
+  String lastBackupAt(String time) {
+    return 'Last backup: $time';
+  }
+
+  @override
+  String get neverBackedUp => 'Not yet';
+
+  @override
+  String backupFailed(String error) {
+    return 'Last backup failed: $error';
+  }
+
+  @override
+  String get restoreConfirmTitle => 'Restore from backup?';
+
+  @override
+  String get restoreConfirmMessage =>
+      'Content in the backup overwrites the matching data on this device; anything not in the backup is left untouched, and your sign-in is kept.';
+
+  @override
+  String get restoreKeepFavorites => 'Keep current favorites';
+
+  @override
+  String get restoreKeepFavoritesHint =>
+      'Checked: keep existing favorites and append new ones (deduplicated). Unchecked: replace them with the backup.';
+
+  @override
+  String get restoreDone => 'Restored from backup';
+
+  @override
+  String dropFilesCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count files',
+      one: '1 file',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String dropLinksCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count links',
+      one: '1 link',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String dropUploadConfirm(String path) {
+    return 'Upload to the current folder: $path?';
+  }
+
+  @override
+  String get dropPickAnotherFolder => 'Change folder';
+
+  @override
+  String get dropAddFavorites => 'Add to favorites';
+
+  @override
+  String get dropAddFavoritesHint =>
+      'Resolved shares are added to favorites directly';
+
+  @override
+  String get dropOpenLinks => 'Open';
+
+  @override
+  String get dropOpenLinksHint => 'Open these links one by one?';
+
+  @override
+  String get dropBatchFavorite => 'Favorite all';
+
+  @override
+  String get dropMixedTitle =>
+      'This drop contains multiple content types and must be handled separately';
+
+  @override
+  String get dropContinue => 'Continue';
+
+  @override
+  String dropHoverUpload(String path) {
+    return 'Drop to upload to $path';
+  }
+
+  @override
+  String get dropHoverPickFolder => 'Drop to choose a target folder';
+
+  @override
+  String get dropHoverFavorite => 'Drop to add to favorites';
+
+  @override
+  String get dropHoverOpenLink => 'Drop to open the link';
+
+  @override
+  String get dropHoverMixed => 'Drop to handle the types separately';
+
+  @override
+  String dropUploaded(int count) {
+    return 'Uploaded $count file(s)';
+  }
+
+  @override
+  String dropFavorited(int count) {
+    return 'Added $count to favorites';
+  }
+
+  @override
+  String dropNeedsPassword(int count) {
+    return '$count need an access code';
+  }
+
+  @override
+  String dropDuplicated(int count) {
+    return '$count already in favorites';
+  }
+
+  @override
+  String dropFailed(int count) {
+    return '$count failed';
+  }
+
+  @override
+  String aboutVersion(String version, int build) {
+    return '$version (build $build)';
+  }
+
+  @override
+  String get aboutTerms => 'Terms of service';
+
+  @override
+  String get aboutPrivacy => 'Privacy policy';
+
+  @override
+  String get aboutLicenses => 'Open-source licenses';
+
+  @override
+  String get aboutProjectHome => 'Project homepage';
+
+  @override
+  String get aboutMyRepo => 'My repository';
+
+  @override
+  String get aboutSubmitIssue => 'Report an issue';
+
+  @override
+  String get relatedInfo => 'Device info';
+
+  @override
+  String get aboutBuildInfo => 'Build info';
+
+  @override
+  String get details => 'Details';
+
+  @override
+  String get buildTime => 'Build time';
+
+  @override
+  String get commitHash => 'Commit';
+
+  @override
+  String get update => 'Updates';
+
+  @override
+  String get updateNotChecked => 'Not checked yet';
+
+  @override
+  String get updateCheckingTitle => 'Checking for updates…';
+
+  @override
+  String get updateUpToDateTitle => 'You\'re up to date';
+
+  @override
+  String get updateFoundTitle => 'New version available';
+
+  @override
+  String get updateFailed => 'Update check failed';
+
+  @override
+  String get updateUnsupported =>
+      'Update checks aren\'t supported on this platform';
+
+  @override
+  String updateLastCheckAt(String time) {
+    return 'Last checked $time';
+  }
+
+  @override
+  String updateReachFailed(String code) {
+    return 'Couldn\'t reach GitHub ($code)';
+  }
+
+  @override
+  String get updateCheck => 'Check for updates';
+
+  @override
+  String get updateCheckingShort => 'Checking';
+
+  @override
+  String get updateRecheck => 'Check again';
+
+  @override
+  String get updateAction => 'Update';
+
+  @override
+  String get updateVersionInfo => 'Version';
+
+  @override
+  String get updateChangelog => 'Release notes';
+
+  @override
+  String get updateChannel => 'Update channel';
+
+  @override
+  String get updateChannelStable => 'Stable';
+
+  @override
+  String get updateChannelBeta => 'Beta';
+
+  @override
+  String get updateAutoCheck => 'Check for updates automatically';
+
+  @override
+  String updateDialogTitle(String version) {
+    return 'New version $version available';
+  }
+
+  @override
+  String get updateViewDetails => 'View details';
+
+  @override
+  String get updateDetectedSubtitle => 'Update available';
+
+  @override
+  String get timeJustNow => 'Just now';
+
+  @override
+  String get dayToday => 'Today';
+
+  @override
+  String get dayYesterday => 'Yesterday';
+
+  @override
+  String timeMinutesAgo(int count) {
+    return '$count min ago';
+  }
+
+  @override
+  String timeTodayAt(String time) {
+    return 'Today $time';
+  }
+
+  @override
+  String timeYesterdayAt(String time) {
+    return 'Yesterday $time';
+  }
+
+  @override
+  String timeMonthDay(int month, int day) {
+    return '$month/$day';
+  }
+
+  @override
+  String timeYearMonthDay(int year, int month, int day) {
+    return '$year/$month/$day';
+  }
+
+  @override
+  String get firstRunWelcome => 'Welcome to LanCloud';
+
+  @override
+  String get firstRunMessage =>
+      'Please read and accept the Terms of Service and Privacy Policy before continuing.';
+
+  @override
+  String get agreeAndContinue => 'Next';
+
+  @override
+  String get disagreeAndExit => 'Decline and exit';
+
+  @override
+  String get recentLimit => 'Recent items limit';
+
+  @override
+  String get recentLimitOff => 'Don\'t record';
+
+  @override
+  String recentLimitValue(int count) {
+    return '$count items';
+  }
+
+  @override
+  String get recentLimitKeywords => 'recent limit history';
+
+  @override
+  String get categoryAccessibility => 'Accessibility';
+
+  @override
+  String get globalAnimations => 'Global animations';
+
+  @override
+  String get motionModeAuto => 'Auto';
+
+  @override
+  String get motionModeAutoSubtitle =>
+      'Automatically disable animations when accessibility features are on';
+
+  @override
+  String get motionModeEnabled => 'On';
+
+  @override
+  String get motionModeDisabled => 'Off';
+
+  @override
+  String get motionModeKeywords =>
+      'animation motion global accessibility reduce remove';
+
+  @override
+  String get a11yFeedback => 'Accessibility issues';
+
+  @override
+  String get a11yFeedbackKeywords =>
+      'accessibility screen reader feedback issue email';
+
+  @override
+  String get a11yFeedbackDialogTitle => 'Report an accessibility issue';
+
+  @override
+  String get a11yFeedbackDialogBody =>
+      'If you run into an accessibility issue but would rather not report it on GitHub, you can send feedback by email here.';
+
+  @override
+  String get feedback => 'Feedback';
+
+  @override
+  String get emailCopied => 'Email address copied';
+
+  @override
+  String get termsBody =>
+      'Terms of Service\n\n1. This is an unofficial third-party LanZou Cloud client for personal use. It is not affiliated with, authorized by, or endorsed by LanZou.\n\n2. You use your own LanZou account. Do not use this app to violate LanZou\'s terms, applicable laws, or the rights of others.\n\n3. The app is provided \"as is\", without warranty of any kind. Risks such as account restrictions, data loss, or failed uploads/downloads are yours to bear.\n\n4. The APIs used are collected from public and unofficial sources and may stop working at any time.\n\n5. The app is open source under the Apache License 2.0. You may modify and redistribute the code, keeping the original license and copyright notices.\n\n6. Continuing to use the app means you have read and accepted these terms; if not, please uninstall it.';
+
+  @override
+  String get privacyBody =>
+      'Privacy Policy\n\n1. The app collects and uploads no personal data. There is no account system, analytics, ads, or crash-reporting SDK.\n\n2. Your LanZou account (cookie), nickname, favorites, recents, transfer history and settings stay on this device. The cookie is kept in encrypted system storage; viewing it requires biometric or screen-lock verification. Runtime logs (errors plus version info) are also kept on this device, and are written to the location you choose via the system save dialog only when you tap Export runtime logs.\n\n3. The app talks directly to official LanZou endpoints (pc.woozooo.com, up.woozooo.com, etc.); requests only serve the actions you start, such as signing in, listing, uploading or downloading.\n\n4. Sharing goes through the system share sheet: content or files are handed to the app you pick, only when you tap share. The clipboard is written only when you tap Copy; Detect clipboard links is off by default, and once you turn it on under Settings - Notifications the app reads the clipboard when returning to the foreground only to detect LanCloud share links and offer to open them, never uploading it.\n\n5. If you configure WebDAV under Backup & restore, backups are uploaded to the server you enter. Backups containing cookies or WebDAV passwords must use a separate backup passphrase and are encrypted as a whole; other backups can also be encrypted. Enabling WebDAV and choosing the server is entirely up to you.\n\n6. The camera permission is only for QR scanning, the install-apps permission is only for opening APKs downloaded, and ignoring battery optimization only keeps background transfers stable. All can be revoked in system settings.\n\n7. Uninstalling the app deletes the accounts and data stored on this device, so back up first.';
+}

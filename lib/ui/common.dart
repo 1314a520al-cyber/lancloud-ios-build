@@ -1,0 +1,5001 @@
+import 'dart:async';
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:local_auth_android/local_auth_android.dart';
+import 'package:local_auth_darwin/local_auth_darwin.dart';
+import 'package:material_ui/material_ui.dart' hide Icons;
+
+import '../core/api/lanzou_client.dart';
+import '../core/api/lanzou_client_registry.dart';
+import '../core/data/app_db_provider.dart';
+import '../core/drive_state.dart';
+import '../core/navigation_appearance_settings_state.dart';
+import '../core/navigation_state.dart';
+import '../core/transfer/transfer_manager_provider.dart';
+import '../l10n/l10n.dart';
+import 'app_scroll.dart';
+import 'app_icons.dart';
+import 'm3e.dart';
+import 'qr_painter.dart';
+import 'reduce_motion.dart';
+import 'scroll_tint.dart';
+
+/// 大屏（平板 / 桌面）布局阈值：≥640dp 时用侧栏 + 圆角内容卡片。
+const double kLargeLayoutBreakpoint = 640;
+
+/// 网盘页路径栏高度（顶栏的 bottom 部分）。
+const double kDrivePathBarHeight = 46;
+
+/// 传输页上传 / 下载切换栏高度（顶栏的 bottom 部分）。
+const double kTransfersTabBarHeight = 58;
+
+/// MD3 模态底部弹窗的默认宽度上限：窗口比它宽时弹窗居中显示，
+/// 两侧不会贴到屏幕边缘（也就用不到挖孔 / 导航栏的左右让位）。
+const double kModalSheetMaxWidth = 640;
+
+/// 「我的」页右窗格里的二级页（列表-详情的第三层）：
+/// 独立打开时是 push 的整页（小屏 / 从搜索跳转），两栏模式时进右窗格
+/// （顶栏换成二级页标题 + 返回按钮）。
+enum ProfileSubPage {
+  advanced,
+  backup,
+  licenses;
+
+  /// 二级页标题（也是「我的」顶栏在两栏模式下的标题）。
+  String label(AppLocalizations l10n) => switch (this) {
+    ProfileSubPage.advanced => l10n.advanced,
+    ProfileSubPage.backup => l10n.backupAndRestore,
+    ProfileSubPage.licenses => l10n.aboutLicenses,
+  };
+}
+
+/// 是否是大屏布局（侧栏 + 圆角主视图）。
+bool isLargeLayout(BuildContext context) =>
+    MediaQuery.sizeOf(context).width >= kLargeLayoutBreakpoint;
+
+/// 普通 `Md3ListItem` 能完整容纳图标、文字和一个尾部操作的最小列宽。
+///
+/// 这是应用自己的内容约束，不是 M3 规定的固定列宽。
+const double kAdaptiveListItemMinWidth = 320;
+
+/// 带进度和两个行内操作的密集条目（例如传输任务）的最小列宽。
+const double kAdaptiveDenseListItemMinWidth = 360;
+
+/// 列表自适应布局最多三栏，避免宽窗口出现难以扫读的过多列。
+const int kAdaptiveListMaxColumns = 3;
+
+/// 按实际可用宽度计算能放下多少个完整条目。
+///
+/// M3 只给出窗口断点和自适应原则，不规定列表在某个断点必须固定几栏；
+/// 这里以条目内容的最小可用宽度为准，再限制最多 [maxColumns] 栏。
+int adaptiveColumnsForWidth(
+  double width, {
+  double minItemWidth = kAdaptiveListItemMinWidth,
+  double spacing = 8,
+  int maxColumns = kAdaptiveListMaxColumns,
+}) {
+  assert(minItemWidth > 0);
+  assert(spacing >= 0);
+  assert(maxColumns >= 1);
+  if (!width.isFinite || width <= 0) return 1;
+  final columns = ((width + spacing) / (minItemWidth + spacing)).floor();
+  return columns.clamp(1, maxColumns).toInt();
+}
+
+/// 把列表布局实际采用的列数传给条目，供动画等局部行为读取。
+class _AdaptiveColumnsScope extends InheritedWidget {
+  const _AdaptiveColumnsScope({required this.columns, required super.child});
+
+  final int columns;
+
+  static int of(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<_AdaptiveColumnsScope>()
+          ?.columns ??
+      1;
+
+  @override
+  bool updateShouldNotify(_AdaptiveColumnsScope oldWidget) =>
+      columns != oldWidget.columns;
+}
+
+/// 大屏外壳里的页面（侧栏布局的第一个路由），或外面套了 [Md3ePageFrame]
+/// 的独立页面：背景由圆角卡片绘制，页面自己必须透明，否则会盖住卡片。
+bool transparentPageBackground(BuildContext context) =>
+    isLargeLayout(context) &&
+    ((ModalRoute.of(context)?.isFirst ?? true) || Md3eFramedScope.of(context));
+
+/// 顶栏底色：大屏布局固定用 surfaceContainer（导航区颜色，与侧栏一致），
+/// 手机布局保持随滚动在 surface → surfaceContainer 之间过渡。
+Color topBarBackgroundColor(BuildContext context, ColorScheme scheme) {
+  if (isLargeLayout(context)) return scheme.surfaceContainer;
+  return Color.lerp(
+        scheme.surface,
+        scheme.surfaceContainer,
+        ScrollTint.of(context),
+      ) ??
+      scheme.surface;
+}
+
+/// 是否在标签外壳（第一个路由）里；push 出来的独立页面返回 false。
+bool inRootShell(BuildContext context) =>
+    ModalRoute.of(context)?.isFirst ?? true;
+
+/// 页面底部被占住的高度：外壳里等于底栏的完整高度（内容 + 系统手势区），
+/// 独立页面等于系统导航栏高度。滚动列表末尾留白、FAB 避让都用它。
+///
+/// 外壳的大屏（横屏 / 平板）布局里，正文卡片已经让开了系统导航栏
+/// （8dp + inset），页面里不再重复补，返回 0；没有卡片的大屏页面
+/// （例如独立打开的标签页）仍按系统导航栏高度补。
+///
+/// 必须在页面自己的上下文里读：Scaffold 会给正文、FAB 等槽位清掉底部内边距。
+double bottomObstructionHeight(BuildContext context) {
+  if (inRootShell(context) && isLargeLayout(context)) return 0;
+  return MediaQuery.paddingOf(context).bottom;
+}
+
+/// 外壳底栏盖在正文上方时（外壳 Scaffold 开了 extendBody），滚动列表末尾
+/// 需要补的留白＝底栏完整高度，最后一条内容才能完全滚到用户眼前，
+/// 而不是永久压在底栏下面。
+///
+/// 悬浮底栏按设计浮在正文上方、内容从它后面穿过，外壳里不补；
+/// push 出来的独立页面没有外壳底栏，按系统导航栏高度补。
+double shellBottomBarInset(BuildContext context) {
+  // 悬浮底栏同样按底栏总高度留白：胶囊虽然浮在内容上方，但滚到最底时
+  // 最后一条也应该完整露出，而不是永久压在胶囊下面。
+  // 外壳因 extendBody 把底栏总高度（含系统导航栏）写进了 padding.bottom，
+  // 直接用这个值两种样式都合适。
+  return bottomObstructionHeight(context);
+}
+
+/// 大屏外壳里正文卡片自己的底部留白：卡片四周留 8dp（见 app.dart 的卡片
+/// 布局），页面正文套在卡片里，也要让开这一段。
+///
+/// 一般页面由外壳在页面外面统一让位（[RootShell] 的 [_withBodyCardGap]）；
+/// 「我的」页两栏态例外：左窗格是导航区，要通到窗口底边（和外壳最左侧的
+/// NavigationRail 一致），所以整页不让位、由页面内部自己给右卡片补这一档。
+double shellBodyCardGap(BuildContext context) =>
+    inRootShell(context) && isLargeLayout(context) ? 8 : 0;
+
+/// 「我的」页两栏布局的宽度断点（M3 expanded 档）：≥ 该宽度时列表-详情并排。
+/// 外壳要靠它判断这一页的正文要不要自己处理底部卡片留白（见
+/// [shellBodyCardGap]）。
+const double kProfileTwoPaneBreakpoint = 840;
+
+/// 大屏（横屏 / 平板）下的 MD3E 正文卡片：body area 用 surface 底色、
+/// 四周 16dp 圆角，外圈留 8dp + 系统导航栏 inset；卡片外面（navigation area）
+/// 由页面 Scaffold 的 surfaceContainer 底色负责。
+///
+/// 卡片顶边跟随顶栏一起收起（[hide] 是 0..1 的收起进度，[topBarHeight]
+/// 含状态栏高度），和外壳里标签页的处理一致。
+///
+/// 小屏（手机竖屏 / 小尺寸窗口）没有卡片：正文区由页面自己用
+/// [BodySideInset] 整体让开左右系统 inset，顶栏仍铺满整屏。
+class Md3eBodyCard extends StatelessWidget {
+  const Md3eBodyCard({
+    super.key,
+    this.topBarHeight = 0,
+    this.hide,
+    this.clipContent = false,
+    required this.child,
+  });
+
+  /// 顶栏高度（含状态栏）：卡片顶边从这里开始，顶栏收起时一起上移。
+  final double topBarHeight;
+
+  /// 顶栏收起进度 0..1；不收起时传 null。
+  final ValueListenable<double>? hide;
+
+  /// 是否把内容裁进卡片圆角里：不透明内容（如 WebView）需要，
+  /// 顶栏在内容里的页面不能开（否则顶栏会被裁掉）。
+  final bool clipContent;
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final listenable = hide;
+    if (listenable == null) {
+      return _build(context, 0);
+    }
+    return ValueListenableBuilder<double>(
+      valueListenable: listenable,
+      builder: (context, value, _) => _build(context, value.clamp(0.0, 1.0)),
+    );
+  }
+
+  Widget _build(BuildContext context, double hidden) {
+    final large = isLargeLayout(context);
+    final systemPadding = MediaQuery.paddingOf(context);
+    final Widget? card = large
+        ? Positioned(
+            key: const ValueKey('md3e-card-background'),
+            // 左侧同样留 8dp + 系统 inset：横屏时挖孔可能在左边，不能贴边
+            left: 8 + systemPadding.left,
+            top: topBarHeight * (1 - hidden),
+            right: 8 + systemPadding.right,
+            bottom: 8 + systemPadding.bottom,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              // 与外壳里的标签页一致：跟随主题背景（OLED 纯黑时也是黑）
+              child: ColoredBox(
+                color: Theme.of(context).scaffoldBackgroundColor,
+              ),
+            ),
+          )
+        : null;
+    // 正文与卡片用同一组内边距，内容不会画到卡片外面
+    final content = Positioned(
+      key: const ValueKey('md3e-content'),
+      left: large ? 8 + systemPadding.left : 0,
+      top: 0,
+      right: large ? 8 + systemPadding.right : 0,
+      bottom: large ? 8 + systemPadding.bottom : 0,
+      // 卡片已经按 left/right/bottom inset 让过位了，内容里不要再让一次：
+      // AppBar / SafeArea / Scrollbar 都会读这些 padding，否则会二次留白。
+      // 顶部保留：状态栏高度仍由页面自己的顶栏使用。
+      child: MediaQuery.removePadding(
+        context: context,
+        removeLeft: large,
+        removeRight: large,
+        removeBottom: large,
+        child: clipContent
+            ? ClipRRect(
+                borderRadius: BorderRadius.circular(large ? 16 : 0),
+                child: child,
+              )
+            : child,
+      ),
+    );
+    return Stack(children: [?card, content]);
+  }
+}
+
+/// 小屏（手机竖屏 / 小尺寸窗口）正文区的左右让位：把系统在屏幕左右两侧的
+/// inset（挖孔 / 三键导航）交给正文区整体承担，页面里的控件不用再各自避让。
+///
+/// 与横屏大屏的 [Md3eBodyCard] 一致的是"整体让位"，不同的是小屏空间紧张：
+/// 正文区直接铺满，不加 8dp 边距、也没有圆角，只把两侧的 inset 让出来。
+class BodySideInset extends StatelessWidget {
+  const BodySideInset({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final padding = MediaQuery.paddingOf(context);
+    final hasSideInset = padding.left > 0 || padding.right > 0;
+    // 即使当前没有左右 inset 也保留这层包装。横竖屏 / 折叠切换时
+    // 左右 inset 可能从 0 变为非 0，直接替换 child 会重建整页正文。
+    return ColoredBox(
+      // 只有真的让出侧边空间时才铺底色；否则会盖住大屏圆角卡片。
+      color: hasSideInset
+          ? Theme.of(context).scaffoldBackgroundColor
+          : Colors.transparent,
+      child: Padding(
+        padding: EdgeInsets.only(left: padding.left, right: padding.right),
+        // 正文区已经让过位了，里面的控件不要再读这两个 inset（会二次留白）
+        child: MediaQuery.removePadding(
+          context: context,
+          removeLeft: true,
+          removeRight: true,
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+/// 标记：本页面外面已经有 MD3E 卡片（[Md3ePageFrame]），
+/// 页面自己不要再铺底色，见 [transparentPageBackground]。
+class Md3eFramedScope extends InheritedWidget {
+  const Md3eFramedScope({super.key, required super.child});
+
+  static bool of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<Md3eFramedScope>() != null;
+
+  @override
+  bool updateShouldNotify(Md3eFramedScope oldWidget) => false;
+}
+
+/// 大屏（横屏 / 平板）下把"独立打开的页面"（例如没进底栏的标签页）
+/// 套成 MD3E 外壳：navigation area 用 surfaceContainer 底色，正文是
+/// 圆角 surface 卡片；顶栏仍由页面自己画在卡片上方。
+///
+/// 小屏（手机竖屏 / 小尺寸窗口）没有卡片，正文区由被套的页面自己让位。
+///
+/// 独立打开的页面不在外壳里，没有外壳的 [ScrollTint] 提供滚动进度，
+/// 顶栏就会一直是初始底色；这里补一层只负责进度的 [ScrollTint]，
+/// 让顶栏的上滑变色和标签页里一致（收起底栏仍由页面自己的进度驱动）。
+class Md3ePageFrame extends StatelessWidget {
+  const Md3ePageFrame({
+    super.key,
+    this.topBarHeight = 0,
+    this.hide,
+    required this.child,
+  });
+
+  /// 页面顶栏高度（含状态栏），用于让卡片顶边跟着顶栏收起。
+  final double topBarHeight;
+
+  /// 顶栏收起进度 0..1；不收起时传 null。
+  final ValueListenable<double>? hide;
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final large = isLargeLayout(context);
+    final scheme = Theme.of(context).colorScheme;
+    // 宽窄布局共用这一条稳定路径：切换时只改背景、边距与圆角。
+    // 页面若被移到新的 Scaffold / Stack 分支，二级页自身的搜索、多选和
+    // ScrollController 都会随 State 一起重建。
+    return Md3eFramedScope(
+      child: Material(
+        color: large ? scheme.surfaceContainer : Colors.transparent,
+        child: Md3eBodyCard(
+          topBarHeight: topBarHeight,
+          hide: hide,
+          child: ScrollTint(child: child),
+        ),
+      ),
+    );
+  }
+}
+
+/// 页面 AppBar 左侧的「返回」按钮：位置、间距、水波纹区域都与原来的
+/// IconButton 一致，只把按钮表面（Material，40dp 圆形）换成 tonal 底色。
+/// 不传 [onPressed] 时按返回处理。
+class AppBarBackButton extends StatelessWidget {
+  const AppBarBackButton({super.key, this.onPressed});
+
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    // Center：AppBar 的 leading 会给 56dp 的紧约束，不居中就会被拉伸成
+    // 整块 56dp 的底色（贴左边、圆底过大）；居中后按钮保持自身 48dp
+    // 点击区，Material（含波纹）仍是 40dp。
+    return Center(
+      child: IconButton(
+        // 读屏要有名字：不加 tooltip 时它只读作「按钮」
+        tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+        onPressed: onPressed ?? () => Navigator.of(context).maybePop(),
+        style: IconButton.styleFrom(
+          backgroundColor: scheme.secondaryContainer,
+          foregroundColor: scheme.onSecondaryContainer,
+        ),
+        icon: const Icon(Icons.arrow_back),
+      ),
+    );
+  }
+}
+
+/// 顶栏标题与搜索框之间的切换动画。
+///
+/// 搜索框淡入 + 从右侧轻轻滑入，退出时反向；直接替换会显得很生硬。
+/// 系统要求少动效时立即切换（不做位移 / 淡入）。
+class AppBarSearchSwitcher extends StatelessWidget {
+  const AppBarSearchSwitcher({
+    super.key,
+    required this.searching,
+    required this.title,
+    required this.searchField,
+  });
+
+  final bool searching;
+  final Widget title;
+  final Widget searchField;
+
+  @override
+  Widget build(BuildContext context) {
+    final duration = reduceMotionOf(context)
+        ? Duration.zero
+        : const Duration(milliseconds: 220);
+    return AnimatedSwitcher(
+      duration: duration,
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      // 默认布局会把进出两个子控件居中堆叠，这里保持左对齐（顶栏标题的位置）
+      layoutBuilder: (currentChild, previousChildren) => Stack(
+        alignment: Alignment.centerLeft,
+        children: [...previousChildren, ?currentChild],
+      ),
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0.08, 0),
+            end: Offset.zero,
+          ).animate(animation),
+          child: child,
+        ),
+      ),
+      child: searching
+          ? KeyedSubtree(
+              key: const ValueKey('appbar-search'),
+              child: searchField,
+            )
+          : KeyedSubtree(key: const ValueKey('appbar-title'), child: title),
+    );
+  }
+}
+
+String formatBytes(int bytes) {
+  if (bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var value = bytes.toDouble();
+  var unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return '${value.toStringAsFixed(value >= 100 || unit == 0 ? 0 : 1)} ${units[unit]}';
+}
+
+/// 时间戳 -> yyyy-MM-dd（用于收藏副标题）。
+String formatDateShort(int millis) {
+  final date = DateTime.fromMillisecondsSinceEpoch(millis);
+  final mm = date.month.toString().padLeft(2, '0');
+  final dd = date.day.toString().padLeft(2, '0');
+  return '${date.year}-$mm-$dd';
+}
+
+/// 相对时间文案：刚刚 / 5分钟前 / 今天 14:30 / 昨天 09:15 / 10月15日 /
+/// 2025年10月15日（更新页「上次检测于 …」用）。
+///
+/// 分档：
+/// - 1 分钟内（含时钟偏差导致的「未来」时间）→ 刚刚；
+/// - 1 分钟内到 1 小时 → N分钟前；
+/// - 再往上按本地日历分「今天 / 昨天」，只显示时分；
+/// - 更早只显示日期，跨年才带年份。
+///
+/// [now] 仅测试注入；文案都走 l10n（见各自的 timeXxx 词条）。
+String formatRelativeTime(
+  AppLocalizations l10n,
+  DateTime time, {
+  DateTime? now,
+}) {
+  final current = now ?? DateTime.now();
+  final diff = current.difference(time);
+  if (diff.isNegative || diff.inMinutes < 1) return l10n.timeJustNow;
+  if (diff.inHours < 1) return l10n.timeMinutesAgo(diff.inMinutes);
+  final day = DateTime(time.year, time.month, time.day);
+  final today = DateTime(current.year, current.month, current.day);
+  final days = today.difference(day).inDays;
+  if (days == 0) return l10n.timeTodayAt(_hourMinute(time));
+  if (days == 1) return l10n.timeYesterdayAt(_hourMinute(time));
+  if (time.year == current.year) {
+    return l10n.timeMonthDay(time.month, time.day);
+  }
+  return l10n.timeYearMonthDay(time.year, time.month, time.day);
+}
+
+/// HH:mm（24 小时制，补零）。
+String _hourMinute(DateTime time) =>
+    '${time.hour.toString().padLeft(2, '0')}:'
+    '${time.minute.toString().padLeft(2, '0')}';
+
+/// 蓝奏云接口返回的大小是 "1.2 M" 这类文本。
+String prettyLzSize(String raw) {
+  final text = raw.trim().replaceAll(' ', '');
+  if (text.isEmpty) return '';
+  final m = RegExp(r'^([\d.]+)([BKMG]?)$').firstMatch(text.toUpperCase());
+  if (m == null) return raw;
+  final value = double.tryParse(m.group(1)!) ?? 0;
+  final unit = m.group(2) ?? '';
+  switch (unit) {
+    case 'B':
+      return formatBytes(value.round());
+    case 'K':
+      return formatBytes((value * 1024).round());
+    case 'G':
+      return formatBytes((value * 1024 * 1024 * 1024).round());
+    case 'M':
+    default:
+      return formatBytes((value * 1024 * 1024).round());
+  }
+}
+
+int lzSizeToBytes(String raw) {
+  final text = raw.trim().replaceAll(' ', '').toUpperCase();
+  final m = RegExp(r'^([\d.]+)([BKMG]?)$').firstMatch(text);
+  if (m == null) return 0;
+  final value = double.tryParse(m.group(1)!) ?? 0;
+  switch (m.group(2) ?? 'M') {
+    case 'B':
+      return value.round();
+    case 'K':
+      return (value * 1024).round();
+    case 'G':
+      return (value * 1024 * 1024 * 1024).round();
+    default:
+      return (value * 1024 * 1024).round();
+  }
+}
+
+/// 复制文本并给出反馈。
+///
+/// [asToast] 为真时用 [showAppToast]：底部弹窗打开时 SnackBar 会被弹窗
+/// 挡住，这类「在弹窗里完成的动作」必须用浮在最上层的轻提示。
+Future<void> copyText(
+  BuildContext context,
+  String text, {
+  bool asToast = false,
+}) async {
+  await Clipboard.setData(ClipboardData(text: text));
+  if (!context.mounted) return;
+  if (asToast) {
+    showAppToast(context, context.l10n.copiedToClipboard);
+  } else {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(context.l10n.copiedToClipboard)));
+  }
+}
+
+/// 当前正在显示的轻提示（同一时间只留一个，避免叠在一起）。
+OverlayEntry? _activeToast;
+
+/// 应用内轻提示：盖在整个应用最上层（包括底部弹窗之上），约 2 秒后淡出。
+///
+/// 用在「弹窗里完成的动作」上——SnackBar 挂在 Scaffold 里，底部弹窗打开时
+/// 会被弹窗盖住，用户看不到反馈。位置放在顶部：弹窗占的是下半屏，顶部不会
+/// 和弹窗内容打架。
+void showAppToast(BuildContext context, String message) {
+  final overlay = Overlay.maybeOf(context, rootOverlay: true);
+  if (overlay == null) return;
+  _activeToast?.remove();
+  _activeToast = null;
+  late final OverlayEntry entry;
+  entry = OverlayEntry(
+    builder: (context) => _AppToast(
+      message: message,
+      onDone: () {
+        if (_activeToast == entry) _activeToast = null;
+        entry.remove();
+      },
+    ),
+  );
+  _activeToast = entry;
+  overlay.insert(entry);
+}
+
+/// 轻提示本体：淡入 + 轻微下滑，停留一会儿再淡出。
+class _AppToast extends StatefulWidget {
+  const _AppToast({required this.message, required this.onDone});
+
+  final String message;
+  final VoidCallback onDone;
+
+  @override
+  State<_AppToast> createState() => _AppToastState();
+}
+
+class _AppToastState extends State<_AppToast>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 180),
+  );
+  Timer? _timer;
+  Timer? _announceTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.forward();
+    // 停留 1.6s 再淡出：和 SnackBar 的短提示时长接近
+    _timer = Timer(const Duration(milliseconds: 1600), () async {
+      if (!mounted) return;
+      await _controller.reverse();
+      if (mounted) widget.onDone();
+    });
+    // 读屏播报同一句：轻提示是自绘浮层，读屏不会自己读。延后 250ms 再发——
+    // 等淡入动画和这一帧的语义树更新落地，否则刚排队的播报会被紧随其后的
+    // 内容变化事件冲掉（华为屏幕朗读上会整句不读）。
+    // 定时器挂在 State 上，随轻提示一起销毁、不会在测试里留挂起任务。
+    _announceTimer = Timer(const Duration(milliseconds: 250), () {
+      if (!mounted) return;
+      final view = View.maybeOf(context);
+      if (view == null) return;
+      unawaited(
+        SemanticsService.sendAnnouncement(
+          view,
+          widget.message,
+          Directionality.of(context),
+        ),
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _announceTimer?.cancel();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Positioned(
+      top: MediaQuery.paddingOf(context).top + 12,
+      left: 0,
+      right: 0,
+      child: IgnorePointer(
+        child: FadeTransition(
+          opacity: _controller,
+          child: SlideTransition(
+            position:
+                Tween<Offset>(
+                  begin: const Offset(0, -0.3),
+                  end: Offset.zero,
+                ).animate(
+                  CurvedAnimation(
+                    parent: _controller,
+                    curve: Curves.easeOutCubic,
+                  ),
+                ),
+            child: Center(
+              // 左右留出边距：长文本不再贴着屏幕边缘
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: ConstrainedBox(
+                  // 大屏上别拉成一整条：与弹窗同量级的宽度上限
+                  constraints: const BoxConstraints(maxWidth: 560),
+                  child: Material(
+                    color: scheme.inverseSurface,
+                    elevation: 3,
+                    shape: const StadiumBorder(),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 10,
+                      ),
+                      child: Text(
+                        widget.message,
+                        // 最多两行，超出省略：错误详情这类长文本不再撑成一大块
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: scheme.onInverseSurface),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 系统身份验证弹窗（生物识别 / 锁屏密码）的本地化文案。
+/// Android 取标题 + 副标题 + 取消按钮，iOS 只有取消按钮（其余用系统文案）。
+List<AuthMessages> authMessagesFor(AppLocalizations l10n) => [
+  AndroidAuthMessages(
+    signInTitle: l10n.authVerifyTitle,
+    signInHint: l10n.authVerifyHint,
+    cancelButton: l10n.cancel,
+  ),
+  IOSAuthMessages(cancelButton: l10n.cancel),
+];
+
+/// 文件类型分类：图标的形状与颜色都按分类区分
+/// （类似 Google Drive 的多彩文件类型图标）。
+enum FileKind {
+  pdf,
+  document,
+  ebook,
+  spreadsheet,
+  presentation,
+  text,
+  code,
+  image,
+  audio,
+  video,
+  archive,
+  disc,
+  android,
+  executable,
+  font,
+  other,
+}
+
+/// 扩展名 → 分类。覆盖蓝奏云允许上传的类型，其余归入 [FileKind.other]。
+FileKind fileKindFor(String name) {
+  final dot = name.lastIndexOf('.');
+  final ext = dot < 0 ? '' : name.substring(dot + 1).toLowerCase();
+  switch (ext) {
+    case 'pdf':
+      return FileKind.pdf;
+
+    // 文档
+    case 'doc':
+    case 'docx':
+    case 'odt':
+    case 'rtf':
+    case 'wps':
+    case 'xmind':
+      return FileKind.document;
+
+    // 电子书
+    case 'epub':
+    case 'mobi':
+    case 'azw':
+    case 'azw3':
+      return FileKind.ebook;
+
+    // 表格 / 数据
+    case 'xls':
+    case 'xlsx':
+    case 'csv':
+    case 'ods':
+    case 'et':
+    case 'accdb':
+    case 'db':
+      return FileKind.spreadsheet;
+
+    // 演示
+    case 'ppt':
+    case 'pptx':
+    case 'odp':
+    case 'dps':
+      return FileKind.presentation;
+
+    // 纯文本 / 配置
+    case 'txt':
+    case 'md':
+    case 'log':
+    case 'ini':
+    case 'cfg':
+    case 'conf':
+      return FileKind.text;
+
+    // 代码 / 脚本
+    case 'dart':
+    case 'java':
+    case 'kt':
+    case 'cpp':
+    case 'c':
+    case 'h':
+    case 'py':
+    case 'js':
+    case 'ts':
+    case 'html':
+    case 'css':
+    case 'json':
+    case 'xml':
+    case 'yaml':
+    case 'yml':
+    case 'sh':
+    case 'bat':
+    case 'lua':
+    case 'jar':
+      return FileKind.code;
+
+    // 图片 / 设计稿
+    case 'jpg':
+    case 'jpeg':
+    case 'png':
+    case 'gif':
+    case 'bmp':
+    case 'webp':
+    case 'svg':
+    case 'ico':
+    case 'heic':
+    case 'avif':
+    case 'psd':
+    case 'brushset':
+      return FileKind.image;
+
+    // 音频
+    case 'mp3':
+    case 'wav':
+    case 'aac':
+    case 'ogg':
+    case 'flac':
+    case 'm4a':
+    case 'ape':
+    case 'wma':
+      return FileKind.audio;
+
+    // 视频
+    case 'mp4':
+    case 'mov':
+    case 'avi':
+    case 'mkv':
+    case 'webm':
+    case 'flv':
+    case 'wmv':
+    case 'm4v':
+      return FileKind.video;
+
+    // 压缩包
+    case 'zip':
+    case 'rar':
+    case '7z':
+    case 'tar':
+    case 'gz':
+    case 'bz2':
+    case 'xz':
+    case 'cab':
+    case 'osz':
+    case 'osk':
+    case 'rp':
+    case 'rplib':
+      return FileKind.archive;
+
+    // 光盘 / 磁盘镜像
+    case 'iso':
+    case 'img':
+    case 'gho':
+    case 'dmg':
+      return FileKind.disc;
+
+    // 安卓安装包
+    case 'apk':
+    case 'xapk':
+      return FileKind.android;
+
+    // 可执行文件 / 安装包
+    case 'exe':
+    case 'msi':
+    case 'dll':
+    case 'deb':
+    case 'rpm':
+    case 'appimage':
+    case 'pkg':
+    case 'crx':
+    case 'imazingapp':
+      return FileKind.executable;
+
+    // 字体
+    case 'ttf':
+    case 'ttc':
+    case 'otf':
+    case 'txf':
+    case 'woff':
+    case 'woff2':
+      return FileKind.font;
+
+    default:
+      return FileKind.other;
+  }
+}
+
+/// 分类 → 文件图标（描边样式）。
+IconData iconForFileKind(FileKind kind) {
+  switch (kind) {
+    case FileKind.pdf:
+      return Icons.picture_as_pdf_outlined;
+    case FileKind.document:
+      return Icons.description_outlined;
+    case FileKind.ebook:
+      return Icons.menu_book_outlined;
+    case FileKind.spreadsheet:
+      return Icons.table_chart_outlined;
+    case FileKind.presentation:
+      return Icons.slideshow_outlined;
+    case FileKind.text:
+      return Icons.article_outlined;
+    case FileKind.code:
+      return Icons.code_outlined;
+    case FileKind.image:
+      return Icons.image_outlined;
+    case FileKind.audio:
+      return Icons.music_note_outlined;
+    case FileKind.video:
+      return Icons.movie_outlined;
+    case FileKind.archive:
+      return Icons.folder_zip_outlined;
+    case FileKind.disc:
+      return Icons.album_outlined;
+    case FileKind.android:
+      return Icons.android_outlined;
+    case FileKind.executable:
+      return Icons.window_outlined;
+    case FileKind.font:
+      return Icons.font_download_outlined;
+    case FileKind.other:
+      return Icons.insert_drive_file_outlined;
+  }
+}
+
+IconData iconForFile(String name) => iconForFileKind(fileKindFor(name));
+
+/// 分类 → 图标配色。亮色主题用 600 档左右的深色；
+/// 深色主题整体提亮，保证在深色卡片上依旧清晰。
+Color fileKindColor(FileKind kind, {Brightness brightness = Brightness.light}) {
+  final base = _fileKindBaseColor(kind);
+  return brightness == Brightness.dark
+      ? Color.lerp(base, Colors.white, 0.28)!
+      : base;
+}
+
+Color _fileKindBaseColor(FileKind kind) {
+  switch (kind) {
+    case FileKind.pdf:
+      return const Color(0xFFD93025); // 红
+    case FileKind.document:
+    case FileKind.ebook:
+      return const Color(0xFF1A73E8); // 蓝
+    case FileKind.spreadsheet:
+      return const Color(0xFF7CB342); // 浅绿
+    case FileKind.presentation:
+      return const Color(0xFFE8710A); // 橙
+    case FileKind.text:
+      return const Color(0xFF616161); // 灰
+    case FileKind.code:
+      return const Color(0xFF3F51B5); // 靛蓝
+    case FileKind.image:
+      return const Color(0xFF43A047); // 绿
+    case FileKind.audio:
+      return const Color(0xFF8E24AA); // 紫
+    case FileKind.video:
+      return const Color(0xFF5E35B1); // 深紫
+    case FileKind.archive:
+      return const Color(0xFF6D4C41); // 棕
+    case FileKind.disc:
+      return const Color(0xFF607D8B); // 蓝灰
+    case FileKind.android:
+      return const Color(0xFF00897B); // 青绿
+    case FileKind.executable:
+      return const Color(0xFF0097A7); // 青
+    case FileKind.font:
+      return const Color(0xFFC2185B); // 玫红
+    case FileKind.other:
+      return const Color(0xFF757575); // 默认灰
+  }
+}
+
+/// 文件名 → 图标颜色（跟随主题明暗）。
+Color fileIconColor(String name, {Brightness brightness = Brightness.light}) =>
+    fileKindColor(fileKindFor(name), brightness: brightness);
+
+class EmptyHint extends StatelessWidget {
+  const EmptyHint({
+    super.key,
+    required this.icon,
+    required this.text,
+    this.animate = true,
+    this.frameSize = 72,
+    this.iconSize = 36,
+  });
+
+  final IconData icon;
+  final String text;
+
+  /// 出现时是否淡入（提示类空状态的显隐渐变）。
+  final bool animate;
+
+  /// 形状外框 / 图标尺寸（首页那两张空状态卡片用 64 / 32，更紧凑）。
+  final double frameSize;
+  final double iconSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final hint = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // MD3E：空状态图标套一层 9 边饼干（Cookie9Sided）形状外框
+          M3eShapedIcon(icon: icon, size: frameSize, iconSize: iconSize),
+          const SizedBox(height: 12),
+          // 浅色主题下 outline 当正文色只有 4.24:1（低于 4.5:1），改用 onSurfaceVariant
+          Text(
+            text,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+    return Center(child: animate ? FadeIn(child: hint) : hint);
+  }
+}
+
+/// 就地错误提示卡片：Error container 底 + on error container 的图标 / 文字。
+///
+/// 用于「文件已失效」「解析失败」这类跟内容贴在一起的提示——比 SnackBar
+/// 更容易和出错的那一项对上号，也比一行裸文字更清楚这是一条状态。
+class ErrorHintCard extends StatelessWidget {
+  const ErrorHintCard({
+    super.key,
+    required this.message,
+    this.margin = EdgeInsets.zero,
+  });
+
+  final String message;
+  final EdgeInsetsGeometry margin;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Padding(
+      padding: margin,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: scheme.errorContainer,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.error_outline, size: 20, color: scheme.onErrorContainer),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                message,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: scheme.onErrorContainer,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 应用统一的非错误提示卡：主题色容器 + info 图标。
+///
+/// 参考 MD3E containment：提示信息放进浅色主题容器、文字和图标使用配对的
+/// on 色；本应用统一使用 secondaryContainer，避免普通提示退化成灰卡片。
+class InfoHintCard extends StatelessWidget {
+  const InfoHintCard({
+    super.key,
+    required this.text,
+    this.icon = Icons.info_outline,
+    this.trailing,
+    this.margin = EdgeInsets.zero,
+  });
+
+  final String text;
+  final IconData icon;
+  final Widget? trailing;
+  final EdgeInsetsGeometry margin;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Padding(
+      padding: margin,
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: scheme.secondaryContainer,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Icon(icon, size: 24, color: scheme.onSecondaryContainer),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                text,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: scheme.onSecondaryContainer,
+                  height: 1.5,
+                ),
+              ),
+            ),
+            if (trailing != null) ...[const SizedBox(width: 8), trailing!],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 出现时淡入：用于空状态、提示文案的显隐渐变。
+class FadeIn extends StatelessWidget {
+  const FadeIn({
+    super.key,
+    required this.child,
+    this.duration = const Duration(milliseconds: 260),
+    this.offset = 0,
+  });
+
+  final Widget child;
+  final Duration duration;
+
+  /// 相对位移（px），会随淡入一起归位。
+  final double offset;
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: duration,
+      curve: Curves.easeOutCubic,
+      builder: (context, t, child) {
+        final faded = Opacity(opacity: t, child: child);
+        if (offset == 0) return faded;
+        return Transform.translate(
+          offset: Offset(0, offset * (1 - t)),
+          child: faded,
+        );
+      },
+      child: child,
+    );
+  }
+}
+
+/// 顶栏浮层：和底栏共用同一套收起进度（[NavigationState.barsHide]），
+/// 滚动向下时整体上滑隐藏、调出时（[NavigationState.animateBarsHide]）下滑显示。
+///
+/// 顶栏不参与列表布局，因此推动它不会改变页面的滚动位置；
+/// 页面需要在列表顶部留出等高的占位（见各页面的 spacer sliver）。
+class TopBarOverlay extends StatelessWidget {
+  const TopBarOverlay({
+    super.key,
+    required this.height,
+    required this.background,
+    required this.builder,
+    this.progress,
+  });
+
+  /// 顶栏完整高度（状态栏 + 工具栏 + bottom），用于计算滑出距离。
+  final double height;
+
+  /// 顶栏底色：和设置/关于页一样，只随滚动从 surface 过渡到
+  /// surfaceContainer，不参与渐隐。页面里的 AppBar 用透明底。
+  final Color background;
+
+  /// 构建顶栏。位移与内容渐隐由本组件统一处理：标题、按钮、路径栏
+  /// 1:1 跟随手指淡出，底色始终保持不透明。
+  final WidgetBuilder builder;
+
+  /// 收起进度来源；为空时用外壳的 [NavigationState.topBarHide]
+  /// （底栏视图共用），独立页面传各自的进度，互不影响。
+  final ValueListenable<double>? progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final container = ProviderScope.containerOf(context);
+    final appearance = container.read(
+      navigationAppearanceSettingsStateProvider,
+    );
+    final hide = progress ?? container.read(navigationStateProvider).topBarHide;
+    return ListenableBuilder(
+      listenable: appearance.revision,
+      builder: (context, _) =>
+          _buildOverlay(context, appearance.hideTopBar, hide),
+    );
+  }
+
+  Widget _buildOverlay(
+    BuildContext context,
+    bool hideTopBar,
+    ValueListenable<double> hide,
+  ) {
+    return ValueListenableBuilder<double>(
+      valueListenable: hide,
+      builder: (context, value, _) {
+        // 只有开启「顶栏收起」时才跟随收起进度
+        final t = hideTopBar ? value.clamp(0.0, 1.0) : 0.0;
+        return IgnorePointer(
+          ignoring: t >= 0.999,
+          child: Transform.translate(
+            offset: Offset(0, -height * t),
+            child: Stack(
+              children: [
+                // 不透明底色（参数同设置/关于页），渐隐只作用于内容
+                Positioned.fill(child: ColoredBox(color: background)),
+                Opacity(
+                  opacity: (1 - t).clamp(0.0, 1.0),
+                  // 顶栏高度按传入值收紧：AppBar 带 bottom 时内部是带
+                  // Flexible 的 Column，无界高度会触发布局断言（备份页的
+                  // 进度线就是这种情况），也顺便保证 bottom 真的参与高度。
+                  child: SizedBox(height: height, child: builder(context)),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 独立页面的顶栏脚手架（设置 / 高级 / 备份 / 关于 / 分享文件夹 / 登录页）：
+/// 顶栏不占布局，上滑时内容 1:1 随手指渐隐并整体滑出，底色保持不透明
+/// （手机布局只做 surface → surfaceContainer 过渡），与首页、网盘、传输、
+/// 收藏、我的五个视图完全一致。
+///
+/// [slivers] 不需要自己留顶栏占位，本组件会在最前面插入等高的 spacer。
+///
+/// 新页面模板（可滚动内容 + 顶栏，复制后按需增删）：
+///
+/// ```dart
+/// class FooPage extends StatelessWidget {
+///   const FooPage({super.key});
+///
+///   @override
+///   Widget build(BuildContext context) {
+///     final l10n = context.l10n;
+///     return TopBarOverlayScaffold(
+///       // 顶栏：必须是透明底，底色由本组件统一绘制（含滚动过渡）
+///       appBar: AppBar(
+///         backgroundColor: Colors.transparent,
+///         scrolledUnderElevation: 0,
+///         leading: IconButton(
+///           icon: const Icon(Icons.arrow_back),
+///           onPressed: () => Navigator.of(context).pop(),
+///         ),
+///         title: Text(l10n.fooTitle),
+///         actions: const [/* IconButton... */],
+///       ),
+///       // 内容：直接给 slivers，顶部不用自己留顶栏占位
+///       slivers: [
+///         SliverPadding(
+///           padding: const EdgeInsets.all(16),
+///           // 内容块数量有限时用 SliverColumn：滚动范围一次算准，
+///           // 滚动条滑块长度不会因为懒布局估算而抖动
+///           sliver: SliverColumn(
+///             children: [
+///               // ListTile / SegmentedList / Md3ListItem ...
+///             ],
+///           ),
+///         ),
+///       ],
+///     );
+///   }
+/// }
+/// ```
+///
+/// 使用要点：
+/// - 页面骨架就是本组件，不要再自己套 Scaffold；顶栏高度（含 AppBar.bottom）
+///   由本组件按 `状态栏 + appBar.preferredSize.height` 自动计算；
+/// - 需要悬浮在正文之上的底部操作栏（如多选栏）时传 [bottomOverlay]：它不占
+///   布局，正文一直铺到屏幕底部，卡片四周不会出现一条挡住内容的底板；需要
+///   自带滚动控制器（如回到顶部按钮）时传 [controller]；传了 [controller] 后，
+///   点顶栏空白处会回到列表顶部（按钮 / 输入框自行响应，不会误触）；
+/// - 滚动驱动是自动的：内部 ScrollTint 监听滚动通知，滑动距离 = 顶栏高度时为
+///   1:1 收起；效果与设置里的「顶栏收起」开关联动，关闭时顶栏固定不收起；
+/// - 若内容滚动发生在原生侧（WebView、相机预览等拿不到 ScrollNotification），
+///   本脚手架暂时接不了，需要用 [TopBarOverlay] 加 `progress` 自行驱动；
+/// - 末尾会自动补一段等于系统导航栏高度的留白（[bottomSafeInset]），
+///   页面内容自己用 SafeArea 让开导航栏时可关掉，避免多出一截滚动范围；
+/// - 本组件用页面自己的收起进度，不会影响标签页共用的外壳进度。
+class TopBarOverlayScaffold extends StatefulWidget {
+  const TopBarOverlayScaffold({
+    super.key,
+    required this.appBar,
+    required this.slivers,
+    this.controller,
+    this.bottomOverlay,
+    this.backgroundColor,
+    this.resizeToAvoidBottomInset,
+    this.bottomSafeInset = true,
+  });
+
+  /// 顶栏内容：请使用透明底色的 AppBar；高度（含 bottom）由本组件计算。
+  final PreferredSizeWidget appBar;
+
+  /// 页面内容 slivers。
+  final List<Widget> slivers;
+
+  final ScrollController? controller;
+
+  /// 悬浮在正文之上的底部覆盖层（例如多选操作栏）。
+  ///
+  /// 与 [Scaffold.bottomNavigationBar] 不同：它走 body 里的 Stack，不参与布局，
+  /// 正文会一直铺到底部——卡片外那一圈能看到列表内容，而不是一条和页面同色的
+  /// 底板（观感与网盘 / 收藏 / 传输页的多选栏一致）。不需要时传 null。
+  final Widget? bottomOverlay;
+  final Color? backgroundColor;
+  final bool? resizeToAvoidBottomInset;
+
+  /// 是否在 slivers 末尾补一段等于系统导航栏（手势区）高度的留白，
+  /// 让最后一条内容能滚到导航栏上方。默认开；页面自己用 SafeArea
+  /// 让开导航栏时（如登录页）关掉，否则会多出一截可滚动的空白。
+  final bool bottomSafeInset;
+
+  @override
+  State<TopBarOverlayScaffold> createState() => _TopBarOverlayScaffoldState();
+}
+
+class _TopBarOverlayScaffoldState extends State<TopBarOverlayScaffold> {
+  /// 页面自己的收起进度：不动外壳的 [NavigationState.topBarHide]，
+  /// 否则返回标签页时会把它们的顶栏一起带走。
+  final ValueNotifier<double> _hide = ValueNotifier<double>(0);
+
+  /// 页面没传 [TopBarOverlayScaffold.controller] 时兜一个：快速滑动条
+  /// 必须和滚动视图共用同一个 controller 才能拖拽。
+  final ScrollController _fallbackScroll = ScrollController();
+  late NavigationAppearanceSettingsState _appearance;
+
+  ScrollController get _scroll => widget.controller ?? _fallbackScroll;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _appearance = ProviderScope.containerOf(context)
+        .read(navigationAppearanceSettingsStateProvider);
+  }
+
+  @override
+  void dispose() {
+    _hide.dispose();
+    _fallbackScroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(
+      valueListenable: _appearance.revision,
+      builder: (context, _, _) =>
+          _buildScaffold(context, _appearance.hideTopBar),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context, bool hideTopBar) {
+    final scheme = Theme.of(context).colorScheme;
+    final topInset =
+        MediaQuery.paddingOf(context).top + widget.appBar.preferredSize.height;
+    return ScrollTint(
+      hideDistance: topInset,
+      readBarsHidden: () => _hide.value,
+      onBarsHidden: hideTopBar
+          ? (value) {
+              _hide.value = value;
+            }
+          : null,
+      child: Builder(
+        builder: (context) => Scaffold(
+          // 大屏外壳里的第一个路由：背景交给外壳的圆角卡片；
+          // 其余大屏页面（横屏 / 平板的二级页）自己铺 navigation area 的
+          // surfaceContainer 底色，正文再套一层圆角 surface 卡片
+          backgroundColor:
+              widget.backgroundColor ??
+              (transparentPageBackground(context)
+                  ? Colors.transparent
+                  : isLargeLayout(context)
+                  ? scheme.surfaceContainer
+                  : null),
+          resizeToAvoidBottomInset: widget.resizeToAvoidBottomInset,
+          body: Md3eBodyCard(
+            topBarHeight: topInset,
+            hide: _hide,
+            child: Stack(
+              children: [
+                // 小屏：正文区整体让开左右挖孔 / 侧边导航栏；
+                // 顶栏保持原样（铺满整屏，自己用 SafeArea 让位）
+                BodySideInset(
+                  // 快速滑动条：顶栏是浮层，滑块从它下方开始；底部让开导航栏留白
+                  child: FastScrollbar(
+                    controller: _scroll,
+                    padding: EdgeInsets.only(
+                      top: topInset,
+                      bottom: widget.bottomSafeInset
+                          ? (isLargeLayout(context)
+                                ? 0
+                                : MediaQuery.paddingOf(context).bottom)
+                          : 0,
+                    ),
+                    child: CustomScrollView(
+                      controller: _scroll,
+                      slivers: [
+                        SliverToBoxAdapter(child: SizedBox(height: topInset)),
+                        ...widget.slivers,
+                        if (widget.bottomSafeInset)
+                          const SliverToBoxAdapter(child: _BottomSystemInset()),
+                      ],
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  top: 0,
+                  child: TopBarOverlay(
+                    height: topInset,
+                    progress: _hide,
+                    background: topBarBackgroundColor(context, scheme),
+                    builder: (context) => _appBarTapToTop(widget.appBar),
+                  ),
+                ),
+                // 底部悬浮操作栏：同样盖在正文上（正文铺到底部，卡片外不遮内容）
+                if (widget.bottomOverlay != null)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: widget.bottomOverlay!,
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 点顶栏空白处回到列表顶部；页面传入 [TopBarOverlayScaffold.controller]
+  /// 时启用（与网盘页一致），没有 controller 的短页面保持原样。
+  Widget _appBarTapToTop(Widget child) {
+    final controller = widget.controller;
+    if (controller == null) return child;
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: () {
+        if (!controller.hasClients) return;
+        controller.animateTo(
+          0,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      },
+      child: child,
+    );
+  }
+}
+
+/// 滚动内容末尾的系统导航栏（手势区）占位。
+///
+/// 只在 Scaffold 的 body 里构建：页面自带 [Scaffold.bottomNavigationBar] 时
+/// 系统已经把它算进布局，Scaffold 会把 body 的底部 padding 清成 0，
+/// 这里就自然不补；没有底栏的页面则按导航栏高度补足。
+/// 本组件用于 [TopBarOverlayScaffold]：大屏下它自己就套了 [Md3eBodyCard]，
+/// 由卡片统一让位，这里返回 0。
+class _BottomSystemInset extends StatelessWidget {
+  const _BottomSystemInset();
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    height: isLargeLayout(context) ? 0 : MediaQuery.paddingOf(context).bottom,
+  );
+}
+
+/// 本地生成二维码弹窗（不经过任何服务器）。
+Future<void> showQrDialog(
+  BuildContext context, {
+  required String title,
+  required String url,
+  String pwd = '',
+}) async {
+  await showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 二维码本身就是分享链接，弹窗里不再重复显示链接文本；读屏用户
+          // 通过这层语义标签拿到地址。
+          Semantics(
+            image: true,
+            label: url,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: ColoredBox(
+                color: Colors.white,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  // 自绘层不引入额外 Widget 布局或 Material 类型依赖，适合
+                  // AlertDialog 用 IntrinsicWidth 测量内容的场景。
+                  child: SizedBox(
+                    width: 200,
+                    height: 200,
+                    child: ExcludeSemantics(
+                      child: CustomPaint(painter: QrCodePainter(url)),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // 有提取码时仍然提示一下：二维码里只有链接，不含提取码
+          if (pwd.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Text(context.l10n.passwordLabel(pwd)),
+          ],
+        ],
+      ),
+      actions: [
+        // 和原来「复制链接」一致的主操作样式：填充按钮
+        FilledButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: Text(context.l10n.close),
+        ),
+      ],
+    ),
+  );
+}
+
+/// 统一的底部弹窗：自适应内容高度，内容超过上限时内部滚动；
+/// 内容滚到顶部后继续下拉会带动整个弹窗下滑（等效 NestedScrolling），
+/// 松手按拖动距离/速度决定关闭或弹回。
+///
+/// 弹窗外壳用 MD3E 的 [M3EBottomSheet]：28dp 顶角、32×4dp 拖拽把手
+/// （按 M3 规范给 22dp 上下留白，凑满 48dp 触控高度）；
+/// 入场动画由路由统一播放（不用组件自带的入场，原因见下）。
+///
+/// 路由仍走框架的 [showModalBottomSheet]：m3e_core 的
+/// `showM3EModalBottomSheet` 会在「builder 返回的不是 M3EBottomSheet」时再
+/// 套一层外壳，而弹窗在这里还要按窗口宽度决定安全区让位（见下），外壳外面
+/// 必须能再包一层 MediaQuery——自己拼装更可控，外观与动效仍是 MD3E 的。
+Future<T?> showAppSheet<T>(
+  BuildContext context, {
+  required Widget child,
+  double maxHeightRatio = 0.8,
+}) {
+  final size = MediaQuery.sizeOf(context);
+  final maxHeight = size.height * maxHeightRatio;
+  // MD3 给模态底部弹窗 640dp 宽度上限：窗口更宽时弹窗居中、离屏幕两侧
+  // 还有很远，这时不需要左右让位；只有弹窗真的通铺整屏（窗口不超过上限）
+  // 时才要避开两侧的挖孔 / 导航栏。
+  final fullWidthSheet = size.width <= kModalSheetMaxWidth;
+  // 系统要求少动效时整块面板直接出现 / 消失，不做滑入滑出
+  final reduceMotion = reduceMotionOf(context);
+  return showModalBottomSheet<T>(
+    context: context,
+    isScrollControlled: true,
+    // 背景与形状都由 MD3E 外壳自己画，路由层保持透明。
+    backgroundColor: Colors.transparent,
+    showDragHandle: false,
+    constraints: const BoxConstraints(maxWidth: kModalSheetMaxWidth),
+    // 入场手感：整块面板由路由滑入，曲线带一点点过冲（峰值 +1.4%，和组件
+    // 原本 spring（stiffness 380 / damping 0.8，过冲约 1.5%）相当），落位前
+    // 轻轻一顿，不打扰——由路由统一播放，也不会像组件自带入场那样露出垫色。
+    // 面板弹过头时，外壳垫在底部的 overshoot 垫色正好补住面板与屏幕底边的缝。
+    // 时长在框架默认 250ms 上放宽到 350ms，节奏更和缓；
+    // 关闭方向不设，仍用框架默认的 200ms。
+    sheetAnimationStyle: reduceMotion
+        ? const AnimationStyle(duration: Duration.zero)
+        : const AnimationStyle(
+            duration: Duration(milliseconds: 350),
+            curve: Cubic(0.22, 1.15, 0.55, 1.02),
+          ),
+    // 通铺整屏时让「弹窗窗体」整体避开左右挖孔：useSafeArea 作用在弹窗
+    // 面板外侧（路由层），弹窗被收窄，而不是面板照旧压住挖孔、只让内容
+    // 缩进一截（那样有挖孔的一侧会多出留白）。
+    useSafeArea: fullWidthSheet,
+    builder: (sheetContext) {
+      // 颜色必须在弹窗自己的 context 里取：弹窗打开期间切换深浅色时，
+      // 主题是实时的，而这里若用调用方在打开时算好的颜色，就会把旧主题
+      // 烤进弹窗背景（控件却跟着新主题走，于是看不清）。
+      final scheme = Theme.of(sheetContext).colorScheme;
+      final sheet = M3EBottomSheet(
+        showDragHandle: true,
+        // 关掉组件自带的「下移 200dp + 淡入」入场动画：m3e_core 在面板下面
+        // 垫了一条 overshoot 垫色（Stack 里在内容之后、不参与这段动画的实色
+        // 色块，高度固定 50dp），入场时内容还在半透明 / 偏下，垫色就会从
+        // 弹窗底部露出来——观感上就是「弹窗底部先冒出一条和弹窗同宽的白色
+        // 矩形」，动画播完才消失。关掉后整块面板（含垫色）由路由的滑入动画
+        // 一起带着走，不会再露底，手柄 / 内容也随面板一起到位。
+        animateEntrance: false,
+        // 内容自带内边距：外壳不再补 24dp，避免所有弹窗被多包一层。
+        padding: EdgeInsets.zero,
+        // M3 规范：底部弹窗容器用 surface container low。
+        backgroundColor: scheme.surfaceContainerLow,
+        style: M3EBottomSheetStyle(
+          backgroundColor: scheme.surfaceContainerLow,
+          // M3 规范：拖拽把手上下留白 22dp（把手 4dp → 48dp 触控高度）。
+          dragHandlePadding: const EdgeInsets.symmetric(vertical: 22),
+        ),
+        // 面板内部只再让开底部导航栏；内容里若还有 SafeArea（不少弹窗内容
+        // 自带）读不到 padding，不会再二次避让多留一截空白。
+        // 左右由上面 useSafeArea 统一处理，这里不要默认值（默认 left/right 为 true）。
+        //
+        // 底部按 viewPadding 垫：键盘弹出时 padding.bottom 会归零（导航栏那段被
+        // 输入法盖住），但面板高度不能跟着缩一截——底栏、面板都统一用系统栏的
+        // 原始高度，键盘弹出 / 收起时不再抽动。
+        child: SafeArea(
+          top: false,
+          left: false,
+          right: false,
+          maintainBottomViewPadding: true,
+          child: Builder(
+            builder: (context) => MediaQuery.removePadding(
+              context: context,
+              removeTop: true,
+              removeLeft: true,
+              removeRight: true,
+              removeBottom: true,
+              child: MeasuredSheet(maxHeight: maxHeight, child: child),
+            ),
+          ),
+        ),
+      );
+      // 弹窗被 640dp 上限居中时，两侧已经远离挖孔 / 导航栏；M3EBottomSheet
+      // 自带 SafeArea（左右默认 true），这里要去掉水平 padding，否则内容会
+      // 在已经居中让位的基础上再缩进一截。
+      return fullWidthSheet
+          ? sheet
+          : MediaQuery.removePadding(
+              context: sheetContext,
+              removeLeft: true,
+              removeRight: true,
+              child: sheet,
+            );
+    },
+  );
+}
+
+/// 自适应内容高度的弹窗外壳：
+/// - 先测量内容自然高度，再取 min(内容高度, 上限) 作为弹窗高度；
+/// - 内容尺寸变化（例如弹出键盘）时自动重新测量；
+/// - 内容滚到顶部后继续下拉，剩余位移会带动弹窗下滑（等效 Android 的
+///   NestedScrolling），松手时按拖动距离与速度决定关闭或弹回。
+class MeasuredSheet extends StatefulWidget {
+  const MeasuredSheet({
+    super.key,
+    required this.child,
+    required this.maxHeight,
+  });
+
+  final Widget child;
+  final double maxHeight;
+
+  @override
+  State<MeasuredSheet> createState() => _MeasuredSheetState();
+}
+
+class _MeasuredSheetState extends State<MeasuredSheet>
+    with SingleTickerProviderStateMixin {
+  final GlobalKey _contentKey = GlobalKey();
+  double? _contentHeight;
+
+  /// 弹窗被向下拖出的距离（0 = 完全展开）。
+  double _pull = 0;
+
+  /// 松手后的弹回动画。
+  late final AnimationController _settle = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 220),
+  );
+  Animation<double>? _settleTween;
+
+  /// 指针速度采样：用于判断“快速下滑关闭”。
+  VelocityTracker? _tracker;
+  int? _pointer;
+
+  @override
+  void initState() {
+    super.initState();
+    _settle.addListener(_onSettleTick);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measure());
+  }
+
+  @override
+  void dispose() {
+    _settle.dispose();
+    super.dispose();
+  }
+
+  void _onSettleTick() {
+    final tween = _settleTween;
+    if (tween == null) return;
+    setState(() => _pull = tween.value);
+  }
+
+  void _measure() {
+    if (!mounted) return;
+    final box = _contentKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final height = box.size.height;
+    if (height != _contentHeight) {
+      setState(() => _contentHeight = height);
+    }
+  }
+
+  /// 完全展开时的高度：内容自然高度，不超过上限。
+  double get _expandedHeight => _contentHeight == null
+      ? widget.maxHeight
+      : math.min(widget.maxHeight, _contentHeight!);
+
+  void _stopSettle() {
+    if (_settle.isAnimating) _settle.stop();
+    _settleTween = null;
+  }
+
+  void _springBack() {
+    if (_pull <= 0) return;
+    _settleTween = Tween<double>(
+      begin: _pull,
+      end: 0,
+    ).animate(CurvedAnimation(parent: _settle, curve: Curves.easeOutCubic));
+    _settle.forward(from: 0);
+  }
+
+  /// 手势位移分配（滚动坐标：正值 = 手指下拉）。
+  /// 列表先滚到顶部，超出的位移带动弹窗下滑；反向拖动先还回弹窗。
+  double _distributeDrag(double offset, ScrollMetrics position) {
+    if (offset == 0) return 0;
+    var remaining = offset;
+    if (_pull > 0 && remaining < 0) {
+      // 弹窗正被拖出时向上拖动：优先把弹窗还回去
+      final back = math.min(_pull, -remaining);
+      _stopSettle();
+      setState(() => _pull -= back);
+      remaining += back;
+    }
+    if (remaining <= 0) return remaining;
+    final target = position.pixels - remaining;
+    if (target >= position.minScrollExtent) return remaining;
+    // 列表已经到顶：超出的位移交给弹窗（列表只走到顶部为止）
+    final extra = position.minScrollExtent - target;
+    final capacity = math.max(0.0, _expandedHeight - _pull);
+    final used = math.min(extra, capacity);
+    if (used > 0) {
+      _stopSettle();
+      setState(() => _pull += used);
+    }
+    return remaining - (extra - used);
+  }
+
+  void _onPointerDown(PointerDownEvent event) {
+    _pointer = event.pointer;
+    _tracker = VelocityTracker.withKind(event.kind)
+      ..addPosition(event.timeStamp, event.position);
+  }
+
+  void _onPointerMove(PointerMoveEvent event) {
+    if (event.pointer != _pointer) return;
+    _tracker?.addPosition(event.timeStamp, event.position);
+  }
+
+  void _onPointerEnd(PointerEvent event) {
+    if (event.pointer != _pointer) return;
+    final pull = _pull;
+    final velocity = _tracker?.getVelocity().pixelsPerSecond.dy ?? 0.0;
+    _pointer = null;
+    _tracker = null;
+    if (pull <= 0) return;
+    // 快速下滑，或拖过弹窗高度的 35%：关闭弹窗，否则弹回
+    final shouldClose =
+        velocity > 700 || (velocity > -700 && pull > _expandedHeight * 0.35);
+    if (shouldClose) {
+      Navigator.of(context).pop();
+    } else {
+      _springBack();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final measured = _contentHeight;
+    final height = math.max(0.0, _expandedHeight - _pull);
+    return Opacity(
+      opacity: measured == null ? 0 : 1,
+      child: SizedBox(
+        height: height,
+        child: Listener(
+          onPointerDown: _onPointerDown,
+          onPointerMove: _onPointerMove,
+          onPointerUp: _onPointerEnd,
+          onPointerCancel: _onPointerEnd,
+          child: SingleChildScrollView(
+            physics: _SheetDragPhysics(
+              parent: const AlwaysScrollableScrollPhysics(),
+              onOffset: _distributeDrag,
+            ),
+            child: NotificationListener<SizeChangedLayoutNotification>(
+              onNotification: (notification) {
+                // 这个通知是在 layout 阶段发的，直接 setState 会触发
+                // 「Build scheduled during frame」；挪到帧末再量一次尺寸。
+                WidgetsBinding.instance.addPostFrameCallback((_) => _measure());
+                return false;
+              },
+              child: SizeChangedLayoutNotifier(
+                child: SizedBox(key: _contentKey, child: widget.child),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 弹窗内部滚动用的物理：把“到顶后继续下拉”的位移交给弹窗（[onOffset]），
+/// 列表只滚到顶部为止 —— 等效 Android 的 NestedScrolling。
+class _SheetDragPhysics extends ClampingScrollPhysics {
+  const _SheetDragPhysics({super.parent, required this.onOffset});
+
+  /// 输入本次手势位移（滚动坐标：正值 = 手指下拉），
+  /// 返回列表实际应用的位移。
+  final double Function(double offset, ScrollMetrics position) onOffset;
+
+  @override
+  double applyPhysicsToUserOffset(ScrollMetrics position, double offset) =>
+      onOffset(offset, position);
+
+  @override
+  _SheetDragPhysics applyTo(ScrollPhysics? ancestor) =>
+      _SheetDragPhysics(parent: buildParent(ancestor), onOffset: onOffset);
+}
+
+/// 分组标题 + 数量 chip（传输、收藏等列表视图共用）。
+///
+/// [actions] 放在标题右侧，窄屏或大字号时可在自身区域换行，不截断按钮文案。
+/// [compact] 只影响垂直留白；移动端传输页可用它保留紧凑分栏高度。
+class SectionHeader extends StatelessWidget {
+  const SectionHeader({
+    super.key,
+    required this.title,
+    required this.count,
+    this.actions = const <Widget>[],
+    this.compact = false,
+  });
+
+  final String title;
+  final int count;
+  final List<Widget> actions;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final titleBlock = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          title,
+          style: context.m3eEmphasizedTheme.titleSmall?.copyWith(
+            color: scheme.primary,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text('$count', style: Theme.of(context).textTheme.labelSmall),
+        ),
+      ],
+    );
+    return Padding(
+      padding: compact
+          ? const EdgeInsets.fromLTRB(4, 0, 4, 0)
+          : const EdgeInsets.fromLTRB(4, 16, 4, 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          titleBlock,
+          if (actions.isNotEmpty) ...[
+            const SizedBox(width: 8),
+            Expanded(
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: Wrap(
+                  alignment: WrapAlignment.end,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  runSpacing: 4,
+                  children: actions,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// 多选操作栏里的单个操作：MD3E 图标按钮。
+///
+/// **参考 M3 规范**：密集排布的操作可以用图标按钮组成工具栏 / 按钮组
+/// （图标要含义明确，tooltip 描述动作）。与「文件属性弹窗」那排常用操作
+/// 同一套观感：tonal 圆形容器 + 按下形状形变，禁用时容器与图标一起压暗。
+class BatchAction extends StatelessWidget {
+  const BatchAction({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+
+  /// 悬停 / 长按提示，同时充当读屏名称（描述动作，不是图标名）。
+  final String label;
+
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    // MD3E standard 图标按钮：容器底色跟外层悬浮条一致（不画可见容器，
+    // 只有状态层）+ 按下形状形变；没有可见文字，tooltip 同时充当读屏名称，
+    // 禁用时读作「下载，已停用」（M3eIconButton 内部已处理语义）。
+    return M3eIconButton(
+      icon: icon,
+      tooltip: label,
+      onPressed: onPressed,
+      enablePressedMorph: false,
+    );
+  }
+}
+
+/// 桌面端（Windows）：把列表项 / 卡片的图标块包成可点区域。
+///
+/// 点图标 = 长按该项（进入多选并选中它），这是鼠标下的快捷方式；
+/// 其它平台传 null，图标块保持纯展示，也不会额外产生读屏节点
+/// （整行本身已经带名字和点击 / 长按动作）。
+class IconBoxTap extends StatelessWidget {
+  const IconBoxTap({super.key, this.onTap, required this.child});
+
+  final VoidCallback? onTap;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final onTap = this.onTap;
+    if (onTap == null) return child;
+    return ExcludeSemantics(
+      child: GestureDetector(
+        // 图标块在整行的 InkWell 里：内层手势在竞技场里先胜出，
+        // 点图标不会同时触发整行的 onTap（打开文件夹 / 文件）。
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: child,
+      ),
+    );
+  }
+}
+
+/// 是否检测到鼠标。悬停事件只来自鼠标 / 触控板，触摸屏不会触发，
+/// 所以用它给桌面端交互（点图标块进入多选）做运行时开关：
+/// Android 插上鼠标也能用，纯触摸时行为保持不变。
+class PointerSupport {
+  PointerSupport._();
+
+  static final ValueNotifier<bool> hasMouse = ValueNotifier<bool>(false);
+}
+
+/// 全局检测鼠标：鼠标悬停 / 按下时把 [PointerSupport.hasMouse] 置真
+/// （一旦检测到就一直保持，触摸与鼠标混用时不来回切）。
+class MousePresenceDetector extends StatelessWidget {
+  const MousePresenceDetector({super.key, required this.child});
+
+  final Widget child;
+
+  void _mark(PointerEvent event) {
+    if (event.kind != PointerDeviceKind.mouse) return;
+    if (!PointerSupport.hasMouse.value) PointerSupport.hasMouse.value = true;
+  }
+
+  @override
+  Widget build(BuildContext context) => Listener(
+    behavior: HitTestBehavior.translucent,
+    onPointerHover: _mark,
+    onPointerDown: _mark,
+    child: child,
+  );
+}
+
+/// 点图标块时要执行的动作：
+/// - 没检测到鼠标 → null（图标块只做展示）；
+/// - 已选中 → 走整行在选中态的点击（取消选中）；
+/// - 未选中 → 走长按（进入多选并选中这一项）。
+VoidCallback? iconTapFor({
+  required bool selected,
+  required VoidCallback? onTap,
+  required VoidCallback? onLongPress,
+}) {
+  if (!PointerSupport.hasMouse.value || onLongPress == null) return null;
+  if (selected && onTap != null) return onTap;
+  return onLongPress;
+}
+
+/// Windows：鼠标侧键「后退」（XBUTTON1）当作系统返回键。
+///
+/// [onBack] 由外层接到根 Navigator 的 `maybePop()`：有可弹出的路由就先 pop
+/// （页面转场、PopScope 都会照常生效）；在根页面则由 RootShell 的 PopScope
+/// 处理（退出多选 / 网盘返回上一级 / 回到默认视图 / 传输中的退出确认）。
+class MouseBackButtonListener extends StatelessWidget {
+  const MouseBackButtonListener({
+    super.key,
+    required this.child,
+    required this.onBack,
+    this.enabled = true,
+  });
+
+  final Widget child;
+
+  /// 后退键按下时要执行的动作（一般是 `navigator.maybePop()`）。
+  final VoidCallback onBack;
+
+  /// 测试里可显式打开；默认按钮是否生效由调用方按平台决定。
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!enabled) return child;
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (event) {
+        if (event.kind != PointerDeviceKind.mouse) return;
+        if (event.buttons & kBackMouseButton == 0) return;
+        onBack();
+      },
+      child: child,
+    );
+  }
+}
+
+/// MD3E 标准列表项：圆角图标块 + 标题 / 副标题 + 尾部操作。
+/// 首页（快速访问、最近使用）、传输、收藏共用，参数与网盘列表项一致：
+/// 内边距 10/8、图标块 42dp（圆角 12）、标题 bodyLarge、副标题 bodyMedium。
+/// 尾部操作按钮统一用 `M3eIconButton`（40dp 圆形容器 / 24dp 图标、触控目标
+/// 48dp、按下有 M3E 形状形变），保证各页的 ⋯ / ✕ 尺寸位置一致。
+///
+/// 动画与网盘列表同款：
+/// - 挂载时淡入 + 轻微上移（[index] 控制错峰，只取前 8 项）；
+/// - [removing] 置 true 时淡出并收起高度，播完再由外部真正删除；
+/// - [pulse] 递增时做一次高亮闪烁（修改信息 / 密码后）。
+class Md3ListItem extends StatefulWidget {
+  const Md3ListItem({
+    super.key,
+    required this.icon,
+    required this.title,
+    this.subtitle = '',
+    this.onTap,
+    this.onLongPress,
+    this.onSecondaryTap,
+    this.trailing,
+    this.badge,
+    this.selected = false,
+    this.iconBoxColor,
+    this.iconColor,
+    this.onIconTap,
+    this.bottom,
+    this.titleMaxLines = 1,
+    this.subtitleMaxLines = 1,
+    this.index = 0,
+    this.animateIn = true,
+    this.removing = false,
+    this.pulse = 0,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
+
+  /// 次要点击（任意平台鼠标右键）：回调参数是该次点击的全局坐标。
+  final ValueChanged<Offset>? onSecondaryTap;
+
+  /// 尾部操作（⋯、重试、打开等）。
+  final Widget? trailing;
+
+  /// 尾部操作前的小标记（例如「已加入下载」小图标）；没有就传 null。
+  final Widget? badge;
+
+  /// 多选选中态：整行填主色容器，圆角由外层分组控制。
+  final bool selected;
+
+  /// 图标块底色，默认 surfaceContainerHigh（与网盘页列表项一致）。
+  final Color? iconBoxColor;
+
+  /// 图标颜色，默认主题强调色（文件夹用主色，文件传类型色）。
+  final Color? iconColor;
+
+  /// 点图标块的回调（Windows 上用于「进入多选并选中」，等价长按）。
+  final VoidCallback? onIconTap;
+
+  /// 标题行下方的附加内容（例如传输进度条）。
+  final Widget? bottom;
+
+  final int titleMaxLines;
+  final int subtitleMaxLines;
+
+  /// 出现动画的错峰下标（列表里传当前下标即可）。
+  final int index;
+
+  /// 是否播放挂载时的淡入动画。
+  final bool animateIn;
+
+  /// 删除前置 true：淡出 + 收起高度，动画结束后外部再真正移除。
+  final bool removing;
+
+  /// 修改后 +1：触发一次高亮闪烁。
+  final int pulse;
+
+  @override
+  State<Md3ListItem> createState() => _Md3ListItemState();
+}
+
+class _Md3ListItemState extends State<Md3ListItem>
+    with TickerProviderStateMixin {
+  static const _enterDuration = Duration(milliseconds: 260);
+  static const _removeDuration = Duration(milliseconds: 200);
+  static const _pulseDuration = Duration(milliseconds: 700);
+
+  /// 与网盘列表一致的错峰步长（毫秒）。
+  static const _enterStep = 26;
+
+  late final AnimationController _enter = AnimationController(
+    vsync: this,
+    duration: _enterDuration,
+  );
+  late final AnimationController _remove = AnimationController(
+    vsync: this,
+    duration: _removeDuration,
+    value: widget.removing ? 1 : 0,
+  );
+  late final AnimationController _pulseCtrl = AnimationController(
+    vsync: this,
+    duration: _pulseDuration,
+    // 1 表示这次高亮已经播完（透明度为 0）
+    value: 1,
+  );
+
+  bool _enterStarted = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_enterStarted) return;
+    _enterStarted = true;
+    // 页面要求不播、或列表刚删过条目（[ListEnterGate]）时直接显示，
+    // 避免数据增删时条目一个个淡入
+    if (!widget.animateIn || ListEnterGate.suppressIn(context)) {
+      _enter.value = 1;
+      return;
+    }
+    final delay = widget.index.clamp(0, 8) * _enterStep;
+    if (delay == 0) {
+      _enter.forward();
+    } else {
+      Future<void>.delayed(Duration(milliseconds: delay), () {
+        if (mounted) _enter.forward();
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant Md3ListItem oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 系统要求少动效：删除 / 高亮都直接到位，不做淡出与闪烁
+    final reduceMotion = reduceMotionOf(context);
+    if (widget.removing != oldWidget.removing) {
+      if (widget.removing) {
+        if (reduceMotion) {
+          _remove.value = 1;
+        } else {
+          _remove.forward();
+        }
+      } else {
+        _remove.reverse();
+      }
+    }
+    if (widget.pulse > oldWidget.pulse && !reduceMotion) {
+      _pulseCtrl.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _enter.dispose();
+    _remove.dispose();
+    _pulseCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final item = Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: widget.onTap,
+        onLongPress: widget.onLongPress,
+        // 任意平台鼠标右键 = 点 ⋯ 菜单（同一套操作），并保留鼠标坐标。
+        onSecondaryTapUp: widget.onSecondaryTap == null
+            ? null
+            : (TapUpDetails details) =>
+                  widget.onSecondaryTap!(details.globalPosition),
+        child: ColoredBox(
+          color: widget.selected ? scheme.primaryContainer : Colors.transparent,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 2, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    IconBoxTap(
+                      onTap: widget.onIconTap,
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 220),
+                        curve: Curves.easeOutCubic,
+                        width: 42,
+                        height: 42,
+                        decoration: BoxDecoration(
+                          color: widget.selected
+                              ? scheme.surface
+                              : widget.iconBoxColor ??
+                                    scheme.surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(
+                          widget.selected ? Icons.check_circle : widget.icon,
+                          size: 22,
+                          color: widget.selected
+                              ? scheme.primary
+                              : widget.iconColor ?? scheme.primary,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.title,
+                            maxLines: widget.titleMaxLines,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodyLarge,
+                          ),
+                          if (widget.subtitle.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Text(
+                                widget.subtitle,
+                                maxLines: widget.subtitleMaxLines,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  color: scheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
+                          // 附加上下文（例如传输进度条）跟标题同宽：
+                          // 放在文字列里而不是整行下方，自动避让左侧图标
+                          // 与右侧操作按钮
+                          if (widget.bottom != null) ...[
+                            const SizedBox(height: 10),
+                            widget.bottom!,
+                          ],
+                        ],
+                      ),
+                    ),
+                    if (widget.badge != null) widget.badge!,
+                    if (widget.trailing != null) ...[
+                      const SizedBox(width: 4),
+                      widget.trailing!,
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    // 无障碍：多选时把「已选中」告诉读屏（选中只换了图标，读屏看不出来）。
+    // selected 会合并到条目自身的节点上，不额外多一个焦点；只在选中时标注，
+    // 否则普通浏览状态下每一条都会多读一句「未选中」。
+    final built = AnimatedBuilder(
+      animation: Listenable.merge([_enter, _remove, _pulseCtrl]),
+      builder: (context, child) {
+        final enterT = Curves.easeOutCubic.transform(_enter.value);
+        final removeT = Curves.easeInCubic.transform(_remove.value);
+        final pulseT = _pulseCtrl.value;
+        // 多列（网格）时不收起高度：行高由同行其它条目决定，硬收会让卡片
+        // 被压扁得很奇怪；与网盘网格一致，只做淡出 + 轻微缩小。
+        final collapse = _AdaptiveColumnsScope.of(context) <= 1;
+        var result = child!;
+        // 修改后的高亮闪烁（与网盘列表一致：主色 16% → 0）
+        if (pulseT > 0 && pulseT < 1) {
+          result = Stack(
+            children: [
+              result,
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: ColoredBox(
+                    color: scheme.primary.withValues(
+                      alpha: 0.16 * (1 - pulseT),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          );
+        }
+        result = Opacity(
+          opacity: (enterT * (1 - removeT)).clamp(0.0, 1.0),
+          child: Transform.scale(
+            scale: 1 - 0.06 * removeT,
+            child: Transform.translate(
+              offset: Offset(0, 10 * (1 - enterT)),
+              child: result,
+            ),
+          ),
+        );
+        // 删除时收起高度，让后面的条目平滑补位
+        if (removeT > 0 && collapse) {
+          result = Align(
+            heightFactor: (1 - removeT).clamp(0.0, 1.0),
+            alignment: Alignment.topCenter,
+            child: result,
+          );
+        }
+        return result;
+      },
+      child: item,
+    );
+    return widget.selected ? Semantics(selected: true, child: built) : built;
+  }
+}
+
+/// MD3E 中号宽版图标按钮：胶囊形容器（默认 surfaceContainerLow，与列表卡片同色）
+/// + 24dp 图标，说明文字放在按钮下方。首页「打开链接 / 传输中心」使用。
+///
+/// 按下时圆角从胶囊（半径取半高）形变成 M 档的方块圆角 12dp
+/// （M3E 图标按钮尺寸表：M 档按下 12dp），形状动效用 expressive fast spatial
+/// 弹簧；系统要求少动效时直接跳变。
+class ExpressiveIconButton extends StatefulWidget {
+  const ExpressiveIconButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+    this.badge,
+    this.width = 72,
+    this.height = 56,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onPressed;
+
+  /// 角标文字（例如进行中的传输数量）。
+  final String? badge;
+  final double width;
+  final double height;
+
+  @override
+  State<ExpressiveIconButton> createState() => _ExpressiveIconButtonState();
+}
+
+class _ExpressiveIconButtonState extends State<ExpressiveIconButton>
+    with SingleTickerProviderStateMixin {
+  /// M 档（56dp 容器）的按下圆角。
+  static const double _pressedRadius = 12;
+
+  late final M3eShapeMorph _press = M3eShapeMorph(vsync: this);
+
+  @override
+  void dispose() {
+    _press.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final iconWidget = Icon(
+      widget.icon,
+      size: 24,
+      color: scheme.onSurfaceVariant,
+    );
+    // 无障碍：标签文字在可点区域**下面**（不在 InkWell 里），按钮节点本身
+    // 因此没有名字 —— TalkBack 聚焦到它只会读「按钮」。这里把整块合成一个
+    // 语义节点：显式给 label + button，并接管 onTap（视觉点击仍走 InkWell）。
+    // 角标数字单独读没有意义，并进标签：如「传输 · 3 个任务进行中」。
+    final badge = widget.badge;
+    final badgeCount = badge == null ? null : int.tryParse(badge);
+    final semanticsLabel = badgeCount == null
+        ? widget.label
+        : '${widget.label} · ${context.l10n.notifProgressBody(badgeCount)}';
+    return Semantics(
+      label: semanticsLabel,
+      button: true,
+      enabled: true,
+      onTap: widget.onPressed,
+      excludeSemantics: true,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AnimatedBuilder(
+            animation: _press.controller,
+            builder: (BuildContext context, _) {
+              final shape = RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(
+                  m3eLerpRadius(
+                    widget.height / 2,
+                    _pressedRadius,
+                    _press.value,
+                  ),
+                ),
+              );
+              return Material(
+                color: scheme.surfaceContainerLow,
+                shape: shape,
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onTap: widget.onPressed,
+                  onHighlightChanged: (pressed) =>
+                      _press.setMorphed(context, pressed),
+                  hoverColor: scheme.onSurfaceVariant.withValues(alpha: 0.08),
+                  highlightColor: scheme.onSurfaceVariant.withValues(
+                    alpha: 0.1,
+                  ),
+                  child: SizedBox(
+                    width: widget.width,
+                    height: widget.height,
+                    child: Center(
+                      child: badge == null
+                          ? iconWidget
+                          : Badge(label: Text(badge), child: iconWidget),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+          const SizedBox(height: 6),
+          Text(
+            widget.label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelLarge?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// MD3E 路径胶囊：当前项用主色容器强调，其余为中性容器。
+/// 网盘路径栏与文件夹选择弹窗共用。
+class PathChip extends StatelessWidget {
+  const PathChip({
+    super.key,
+    required this.label,
+    required this.current,
+    required this.onTap,
+    this.verticalPadding = 8,
+  });
+
+  final String label;
+  final bool current;
+  final VoidCallback onTap;
+  final double verticalPadding;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: EdgeInsets.symmetric(vertical: verticalPadding),
+      child: Material(
+        // 只有当前目录带底色，上级目录保持透明
+        color: current ? scheme.secondaryContainer : Colors.transparent,
+        // 大圆角 = 胶囊：高度不足时 Skia 会把半径收到一半，左右看是半圆
+        borderRadius: BorderRadius.circular(999),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: current ? FontWeight.w600 : FontWeight.w400,
+                color: current
+                    ? scheme.onSecondaryContainer
+                    : scheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 路径栏里的一段路径（根目录固定用 id `'-1'`，其余用文件夹 id）。
+class PathSegment {
+  const PathSegment({required this.id, required this.label});
+
+  final String id;
+  final String label;
+}
+
+/// 横向路径栏：进入新目录时新卡片横向展开 + 淡入、返回上级时旧卡片
+/// 收缩淡出（类似 RecyclerView 的增删动画）；路径变化后自动滚到末尾，
+/// 保证当前目录（最后一段）完整可见。网盘页与文件选择弹窗共用。
+class PathBar extends StatefulWidget {
+  const PathBar({
+    super.key,
+    required this.segments,
+    required this.onTap,
+    this.currentIndex,
+    this.verticalPadding = 8,
+  });
+
+  final List<PathSegment> segments;
+
+  /// 点击某一段：回传它在 [segments] 里的下标。
+  final ValueChanged<int> onTap;
+
+  /// 高亮哪一段；默认最后一段（当前目录）。
+  final int? currentIndex;
+
+  /// 卡片上下留白：网盘页 8，弹窗里 4。
+  final double verticalPadding;
+
+  @override
+  State<PathBar> createState() => _PathBarState();
+}
+
+const Duration _pathBarDuration = Duration(milliseconds: 220);
+
+class _PathBarEntry {
+  _PathBarEntry(
+    this.segment, {
+    required TickerProvider vsync,
+    bool visible = true,
+  }) : animation = AnimationController(
+         duration: _pathBarDuration,
+         vsync: vsync,
+         value: visible ? 1 : 0,
+       );
+
+  PathSegment segment;
+  final AnimationController animation;
+  bool removing = false;
+}
+
+class _PathBarState extends State<PathBar> with TickerProviderStateMixin {
+  final ScrollController _scroll = ScrollController();
+  final List<_PathBarEntry> _entries = [];
+
+  @override
+  void initState() {
+    super.initState();
+    for (final segment in widget.segments) {
+      _entries.add(_PathBarEntry(segment, vsync: this));
+    }
+    _scrollToEnd(animate: false);
+  }
+
+  @override
+  void dispose() {
+    for (final entry in _entries) {
+      entry.animation.dispose();
+    }
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant PathBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _sync();
+  }
+
+  /// 与新路径求公共前缀：前缀之后的旧段淡出、新段淡入。
+  void _sync() {
+    final target = widget.segments;
+    // 系统要求少动效：路径卡片直接增删，不做收缩 / 展开
+    final reduceMotion = reduceMotionOf(context);
+    var common = 0;
+    while (common < _entries.length &&
+        common < target.length &&
+        _entries[common].segment.id == target[common].id) {
+      common++;
+    }
+    // 前缀内的名称可能变了（改名）：直接更新，不播动画
+    for (var i = 0; i < common; i++) {
+      if (_entries[i].segment.label != target[i].label) {
+        _entries[i].segment = target[i];
+      }
+    }
+    // 返回上级：前缀之后的旧段收缩淡出，动画结束后再移出列表
+    for (final entry in _entries.sublist(common).toList()) {
+      if (entry.removing) continue;
+      entry.removing = true;
+      if (reduceMotion) {
+        setState(() => _entries.remove(entry));
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => entry.animation.dispose(),
+        );
+        continue;
+      }
+      entry.animation.reverse();
+      Future<void>.delayed(_pathBarDuration, () {
+        if (!mounted) return;
+        setState(() => _entries.remove(entry));
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => entry.animation.dispose(),
+        );
+      });
+    }
+    // 进入新目录：追加新段并播放展开 + 淡入
+    for (final segment in target.sublist(common)) {
+      final entry = _PathBarEntry(segment, vsync: this, visible: reduceMotion);
+      _entries.add(entry);
+      if (reduceMotion) continue;
+      // 新卡片从 0 宽度展开，展开过程中 maxScrollExtent 还在变，
+      // 所以等展开播完再滚一次，保证最后一张卡片完整可见
+      entry.animation.addStatusListener((status) {
+        if (status == AnimationStatus.completed && !entry.removing) {
+          _scrollToEnd();
+        }
+      });
+      entry.animation.forward();
+    }
+    if (target.length > common) _scrollToEnd(animate: !reduceMotion);
+  }
+
+  void _scrollToEnd({bool animate = true}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final target = _scroll.position.maxScrollExtent;
+      if (!animate) {
+        _scroll.jumpTo(target);
+        return;
+      }
+      if ((target - _scroll.offset).abs() < 1) return;
+      _scroll.animateTo(
+        target,
+        duration: _pathBarDuration,
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
+
+  bool _isCurrent(_PathBarEntry entry) {
+    if (entry.removing) return false;
+    final segments = widget.segments;
+    if (segments.isEmpty) return false;
+    var index = widget.currentIndex ?? segments.length - 1;
+    if (index < 0) index = 0;
+    if (index >= segments.length) index = segments.length - 1;
+    return segments[index].id == entry.segment.id;
+  }
+
+  void _handleTap(_PathBarEntry entry) {
+    if (entry.removing) return;
+    final index = widget.segments.indexWhere(
+      (segment) => segment.id == entry.segment.id,
+    );
+    if (index >= 0) widget.onTap(index);
+  }
+
+  Widget _buildEntry(BuildContext context, ColorScheme scheme, int index) {
+    final entry = _entries[index];
+    final curve = CurvedAnimation(
+      parent: entry.animation,
+      curve: Curves.easeOutCubic,
+    );
+    return SizeTransition(
+      axis: Axis.horizontal,
+      sizeFactor: curve,
+      child: FadeTransition(
+        opacity: curve,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (index > 0)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: Icon(
+                  Icons.chevron_right,
+                  size: 16,
+                  color: scheme.outline,
+                ),
+              ),
+            PathChip(
+              label: entry.segment.label,
+              current: _isCurrent(entry),
+              verticalPadding: widget.verticalPadding,
+              onTap: () => _handleTap(entry),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    // 撑满可用宽度：AppBar bottom / Row 给路径栏的是松约束。若滚动视口跟着
+    // 内容收缩，短路径下的 BouncingScrollPhysics 手势区域也会提前截断。
+    return SizedBox(
+      width: double.infinity,
+      child: SingleChildScrollView(
+        controller: _scroll,
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Row(
+          children: [
+            for (var i = 0; i < _entries.length; i++)
+              _buildEntry(context, scheme, i),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 隐藏内容但**保留它占的位置**。
+///
+/// 多选时行尾的 ⋯ / 取消 / 重试等操作要收起来，直接不构建会让条目高度
+/// （和文字可用的宽度）在进入多选的一瞬间跳一下。这里用
+/// [Visibility] 的 maintain 系列参数把位置留住：不可见、不可点、
+/// 不进读屏语义，桌面端 Tab 也跳不到它上面。
+class HideKeepingSpace extends StatelessWidget {
+  const HideKeepingSpace({
+    super.key,
+    required this.hidden,
+    required this.child,
+  });
+
+  final bool hidden;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Visibility(
+      visible: !hidden,
+      maintainSize: true,
+      maintainAnimation: true,
+      maintainState: true,
+      child: child,
+    );
+  }
+}
+
+/// 多选底部操作栏（MD3E）：胶囊 + 一排圆形图标按钮。
+///
+/// **参考 M3 规范**：密集排布的操作组成一行图标按钮（图标含义明确，
+/// tooltip 描述动作）；容器使用 `surface container highest` 和胶囊形圆角。
+/// **本应用的设计决定（非 M3 规范）**：卡片宽度跟随按钮组、水平居中
+/// （不再永远占满屏幕）；M3E 图标按钮的 48dp 触控目标比 40dp 可见容器
+/// 四周各多 4dp，因此容器内边距取 4dp、按钮间距取 0dp，视觉间距均为 8dp。
+/// 网盘、传输、收藏、分享浏览页共用，样式保持一致。
+class BatchActionBar extends StatelessWidget {
+  const BatchActionBar({super.key, required this.children});
+
+  final List<Widget> children;
+
+  /// 悬浮底栏槽位里的上留白：胶囊本身 80dp 高，槽位另有 16dp 顶留白，
+  /// 多选条按整槽避让就会比贴着胶囊多出一截空白。
+  static const double _floatingNavTopGap = 16;
+  static const double _contentPadding = 4;
+  static const double _buttonSpacing = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final appearance = ProviderScope.containerOf(context)
+        .read(navigationAppearanceSettingsStateProvider);
+    return ListenableBuilder(
+      listenable: appearance.revision,
+      builder: (context, _) => _buildBar(context, appearance.floatingNavBar),
+    );
+  }
+
+  Widget _buildBar(BuildContext context, bool floatingNavBar) {
+    final scheme = Theme.of(context).colorScheme;
+    // 外壳开了 extendBody 后，底栏槽位高度会写进正文的 padding.bottom：
+    // 普通底栏 = 80 + 系统手势区；悬浮底栏 = 92 + 系统手势区
+    //（64dp 工具栏 + 16dp 顶留白 + 12dp 底留白）。
+    // 按整槽避让时悬浮样式的多选条会离胶囊多出 16dp，这里回退成胶囊实际高度，
+    // 两种样式的间距保持一致（都是 12dp）。
+    final floatingNavInShell = inRootShell(context) && floatingNavBar;
+    final bottomInset = math.max(
+      0.0,
+      MediaQuery.paddingOf(context).bottom -
+          (floatingNavInShell ? BatchActionBar._floatingNavTopGap : 0.0),
+    );
+    return Padding(
+      padding: EdgeInsets.fromLTRB(12, 4, 12, 12 + bottomInset),
+      // 宽度跟着按钮组走（不再占满屏幕），整体居中
+      child: Align(
+        alignment: Alignment.center,
+        child: Material(
+          key: const ValueKey('batch-action-bar-surface'),
+          color: scheme.surfaceContainerHighest,
+          elevation: 0,
+          surfaceTintColor: Colors.transparent,
+          shape: const StadiumBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: Padding(
+            key: const ValueKey('batch-action-bar-content'),
+            padding: const EdgeInsets.symmetric(
+              horizontal: _contentPadding,
+              vertical: _contentPadding,
+            ),
+            child: Row(
+              key: const ValueKey('batch-action-bar-row'),
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (var i = 0; i < children.length; i++) ...[
+                  if (i > 0) const SizedBox(width: _buttonSpacing),
+                  children[i],
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 进入多选时播报一句「进入多选」。
+///
+/// 注意要在「真正进入多选」的那一刻调用（各页面的 `_enterSelection`），
+/// 不能挂在多选操作栏的 initState 上：那条操作栏在页面里是常驻的
+/// （外面套 AnimatedOpacity + IgnorePointer），切页时就会误播报。
+void announceEnteredMultiSelect(BuildContext context) {
+  final view = View.maybeOf(context);
+  if (view == null) return;
+  final message = context.l10n.enteredMultiSelect;
+  final direction = Directionality.of(context);
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    Future<void>.delayed(const Duration(milliseconds: 250), () {
+      unawaited(SemanticsService.sendAnnouncement(view, message, direction));
+    });
+  });
+}
+
+/// 拖拽上传确认条里的目标路径文案：`根目录` 或 `根目录/abc/def`
+/// （"根目录"按当前语言显示，「网盘页当前目录」由 DrivePage 发布）。
+String drivePathLabel(AppLocalizations l10n, DriveLocation location) => [
+  l10n.root,
+  ...location.path.split('/').where((s) => s.isNotEmpty),
+].join('/');
+
+/// 列表快速滑动条（fast scroll）。
+///
+/// 行为跟原生 Android 一致：滚动时滑块淡入、停止后淡出；只要滑块还在
+/// （滚动刚停下或正在滚动），就能按住拖动快速跳转。Flutter 在 Android 上
+/// 默认不响应滚动条拖拽，必须显式 `interactive: true` 并传入与滚动视图
+/// 同一个 [controller]。
+class FastScrollbar extends StatelessWidget {
+  const FastScrollbar({
+    super.key,
+    required this.controller,
+    required this.child,
+    this.padding,
+  });
+
+  final ScrollController controller;
+  final Widget child;
+
+  /// 轨道内边距。默认用 MediaQuery 的 padding（状态栏 + 系统导航栏），
+  /// 但页面顶栏是浮层：不额外让位的话滑块顶端会被顶栏挡住，
+  /// 所以页面要把「顶栏高度 + 底部占位」传进来。
+  ///
+  /// Material 的 [Scrollbar] 没有 padding 参数（只有 [RawScrollbar] 有），
+  /// 它内部取的是 `MediaQuery.padding`，因此这里只替换滚动条自己的
+  /// MediaQuery，内容仍用原来的 padding。
+  final EdgeInsetsGeometry? padding;
+
+  @override
+  Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final trackPadding = padding?.resolve(Directionality.of(context));
+    return ScrollConfiguration(
+      // 这一层自己画滑块，同时屏蔽框架在桌面端自动追加的系统滚动条：
+      // 否则同一次滚动会出现两条（而且自动那条不带顶栏留白，会被截断）。
+      behavior: const NoAutoScrollbarBehavior(),
+      child: MediaQuery(
+        data: trackPadding == null
+            ? media
+            : media.copyWith(padding: trackPadding),
+        child: ScrollbarTheme(
+          // 不画轨道：只剩一条圆角滑块，避免和窗口边框 / 卡片边缘混在一起像两条
+          data: const ScrollbarThemeData(
+            trackColor: WidgetStatePropertyAll(Colors.transparent),
+          ),
+          child: Scrollbar(
+            controller: controller,
+            interactive: true,
+            thickness: 6,
+            radius: const Radius.circular(3),
+            // 内容恢复原 padding：MediaQuery 覆盖只给滚动条用
+            child: MediaQuery(data: media, child: child),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// MD3E 分区标题：标题文字 + 右侧展开/折叠按钮（M3E 图标按钮：开关态形状
+/// 圆 ↔ 方、按下形变，⌄ 带旋转动画），下方内容用 SegmentedList 分组承载。
+///
+/// 展开 / 收起做的是**整个列表组**的高度过渡（同 ExpansionTile 的
+/// SizeTransition）：内容常驻在树里，只按进度裁剪显示，条目不重建，
+/// 因此不会重播各自的出现动画，收起方向也是内容被逐步裁掉而不是瞬间消失。
+class SectionCard extends StatefulWidget {
+  const SectionCard({
+    super.key,
+    required this.title,
+    required this.child,
+    this.trailing,
+    this.expanded = true,
+    this.onToggle,
+  });
+
+  final String title;
+  final Widget child;
+  final Widget? trailing;
+
+  /// 是否展开；只有提供 [onToggle] 时才可折叠。
+  final bool expanded;
+  final VoidCallback? onToggle;
+
+  @override
+  State<SectionCard> createState() => _SectionCardState();
+}
+
+class _SectionCardState extends State<SectionCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _expand = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 280),
+    value: widget.expanded ? 1 : 0,
+  );
+  late final Animation<double> _factor = CurvedAnimation(
+    parent: _expand,
+    curve: Curves.easeOutCubic,
+  );
+
+  @override
+  void didUpdateWidget(covariant SectionCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.expanded != oldWidget.expanded) {
+      if (reduceMotionOf(context)) {
+        // 系统要求少动效：展开 / 收起直接到位
+        _expand.value = widget.expanded ? 1 : 0;
+      } else if (widget.expanded) {
+        _expand.forward();
+      } else {
+        _expand.reverse();
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _expand.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final headerRow = Padding(
+      // 与分组（SegmentedList 自带 4dp 外边距）左对齐
+      padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              widget.title,
+              // 分区标题用 M3E 强调排版（标题 / 编辑性文字是强调字重的主场）。
+              style: context.m3eEmphasizedTheme.titleMedium,
+            ),
+          ),
+          ?widget.trailing,
+          if (widget.onToggle != null)
+            M3eIconButton(
+              tooltip: widget.expanded
+                  ? context.l10n.collapse
+                  : context.l10n.expand,
+              // 展开 = 开关的选中态：静止形状从圆变方
+              selected: widget.expanded,
+              // 与分组卡片同底色，展开 / 收起按钮浮在标题行右侧
+              containerColor: scheme.surfaceContainerLow,
+              iconBuilder: (context, color) => AnimatedRotation(
+                turns: widget.expanded ? 0.25 : 0,
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOutCubic,
+                child: Icon(Icons.chevron_right, size: 24, color: color),
+              ),
+              onPressed: widget.onToggle,
+            ),
+        ],
+      ),
+    );
+    // 读屏读成一个连贯的「收起快速访问」，而不是「快速访问」+「收起」两项；
+    // 语义节点自带 tap action，读屏双击即可展开 / 收起。
+    // 触摸则只有右侧按钮生效：标题行不做 InkWell，避免整行可点导致误触。
+    // （当前没有页面传 [SectionCard.trailing]，所以 excludeSemantics 不会吞掉
+    // 其它交互控件；将来加 trailing 时要把它的语义放回来。）
+    final header = widget.onToggle == null
+        ? headerRow
+        : Semantics(
+            label: widget.expanded
+                ? context.l10n.collapseSection(widget.title)
+                : context.l10n.expandSection(widget.title),
+            button: true,
+            onTap: widget.onToggle,
+            excludeSemantics: true,
+            child: headerRow,
+          );
+    // 底色与圆角交给分组本身，标题行保持透明
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          header,
+          // 整组高度过渡：内容常驻，收起时被裁掉；对折叠内容禁用交互与读屏
+          IgnorePointer(
+            ignoring: !widget.expanded,
+            child: ExcludeSemantics(
+              excluding: !widget.expanded,
+              child: SizeTransition(
+                sizeFactor: _factor,
+                // 收起时贴着顶边裁（等价于旧的 axisAlignment: -1）
+                alignment: Alignment.topCenter,
+                child: widget.child,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 出现时淡入 + 轻微上移。
+///
+/// 用在「内容从无到有」的地方（例如属性弹窗拉到简介后卡片才出现），
+/// 避免整块凭空“啪”地出现。系统要求少动效时直接显示。
+class RevealOnAppear extends StatefulWidget {
+  const RevealOnAppear({
+    super.key,
+    required this.child,
+    this.duration = const Duration(milliseconds: 260),
+    this.offset = 8,
+  });
+
+  final Widget child;
+  final Duration duration;
+
+  /// 起始位置（向下偏移多少像素），动画结束回到 0。
+  final double offset;
+
+  @override
+  State<RevealOnAppear> createState() => _RevealOnAppearState();
+}
+
+class _RevealOnAppearState extends State<RevealOnAppear>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: widget.duration,
+  );
+  late final Animation<double> _t = CurvedAnimation(
+    parent: _controller,
+    curve: Curves.easeOutCubic,
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.forward();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 系统要求少动效：直接到终态（横竖屏、切主题等依赖变化时会再走一次，
+    // 已经播完的动画不受影响）
+    if (reduceMotionOf(context)) {
+      _controller.value = 1;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _t,
+      child: widget.child,
+      builder: (context, child) => Opacity(
+        opacity: _t.value,
+        child: Transform.translate(
+          offset: Offset(0, widget.offset * (1 - _t.value)),
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+/// 属性弹窗顶部信息卡（MD3E）：圆角容器 + 主色图标块 + 标题/信息/简介。
+/// 文件、文件夹、分享文件属性弹窗共用。
+class PropertyHeaderCard extends StatelessWidget {
+  const PropertyHeaderCard({
+    super.key,
+    required this.icon,
+    required this.title,
+    this.subtitle = '',
+    this.desc = '',
+    this.loading = false,
+    this.iconColor,
+    this.iconBoxColor,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final String desc;
+  final bool loading;
+
+  /// 图标颜色，默认用主题强调色（与文件夹图标一致）。
+  final Color? iconColor;
+
+  /// 图标块底色，默认 surfaceContainerLowest（与网盘页文件项目一致）。
+  final Color? iconBoxColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          // 比弹窗底色（surfaceContainerLow）深一档，卡片才不会糊在弹窗上
+          color: scheme.surfaceContainer,
+          borderRadius: BorderRadius.circular(24),
+        ),
+        // 简介是拉取到之后才补上的：整卡高度跟着内容平滑变化，不要瞬间变高
+        child: AnimatedSize(
+          duration: reduceMotionOf(context)
+              ? Duration.zero
+              : const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.topCenter,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    // 与 Md3ListItem 的图标块保持一致（尺寸 / 圆角 / 字号）
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      // 与列表项的图标块同底色
+                      color: iconBoxColor ?? scheme.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(
+                      icon,
+                      size: 22,
+                      color: iconColor ?? scheme.primary,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.titleMedium,
+                              ),
+                            ),
+                            if (loading) ...[
+                              const SizedBox(width: 8),
+                              // 标题右侧的小圆环：尺寸跟着标题的字号走，
+                              // 和左侧文字视觉重量对齐（线宽同步收细）。
+                              M3eCircularProgressIndicator(
+                                size:
+                                    theme.textTheme.titleMedium?.fontSize ?? 16,
+                                strokeWidth: 2,
+                              ),
+                            ],
+                          ],
+                        ),
+                        if (subtitle.isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 220),
+                            switchInCurve: Curves.easeOut,
+                            switchOutCurve: Curves.easeIn,
+                            transitionBuilder: (child, animation) =>
+                                FadeTransition(
+                                  opacity: animation,
+                                  child: child,
+                                ),
+                            child: Text(
+                              subtitle,
+                              key: ValueKey(subtitle),
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: scheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              if (desc.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                // 简介是拉取到之后才出现的：整块淡入 + 轻微上移，不要凭空跳出
+                RevealOnAppear(
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: scheme.surface,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    // 用 SelectionArea + Text（而不是 SelectableText）：
+                    // 文字可以选中复制，但不会带来自己的上下滚动
+                    child: SelectionArea(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 220),
+                        switchInCurve: Curves.easeOut,
+                        switchOutCurve: Curves.easeIn,
+                        transitionBuilder: (child, animation) =>
+                            FadeTransition(opacity: animation, child: child),
+                        child: Text(
+                          desc,
+                          key: ValueKey(desc),
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            height: 1.5,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 连接式分组的排布方向。
+enum ConnectedAxis {
+  /// 横向（按钮组）：相邻边在左右两侧。
+  horizontal,
+
+  /// 纵向（列表）：相邻边在上下两端。
+  vertical,
+}
+
+/// MD3 Expressive 连接式分组的分角：
+/// 组两端（外侧）用 [outer]，组内相邻处用 [inner]；
+/// [axis] 决定“相邻边”在左右还是上下；
+/// [pressedIndex] 命中时该条目整体放大到 [pressedRadius]，
+/// 相邻条目的相邻角同步收圆到 [outer]（shape morphing）。
+BorderRadius connectedItemRadius({
+  required int index,
+  required int count,
+  required double outer,
+  required double inner,
+  ConnectedAxis axis = ConnectedAxis.vertical,
+  int? pressedIndex,
+  double? pressedRadius,
+}) {
+  final Radius outerRadius = Radius.circular(outer);
+  final Radius innerRadius = Radius.circular(inner);
+  final bool isFirst = index == 0;
+  final bool isLast = index == count - 1;
+  final bool horizontal = axis == ConnectedAxis.horizontal;
+  // 横向：左右两端是外侧圆角；纵向：上下两端是外侧圆角
+  Radius topLeft;
+  Radius topRight;
+  Radius bottomLeft;
+  Radius bottomRight;
+  if (horizontal) {
+    topLeft = isFirst ? outerRadius : innerRadius;
+    bottomLeft = isFirst ? outerRadius : innerRadius;
+    topRight = isLast ? outerRadius : innerRadius;
+    bottomRight = isLast ? outerRadius : innerRadius;
+  } else {
+    topLeft = isFirst ? outerRadius : innerRadius;
+    topRight = isFirst ? outerRadius : innerRadius;
+    bottomLeft = isLast ? outerRadius : innerRadius;
+    bottomRight = isLast ? outerRadius : innerRadius;
+  }
+
+  if (pressedIndex == null || pressedRadius == null) {
+    return BorderRadius.only(
+      topLeft: topLeft,
+      topRight: topRight,
+      bottomLeft: bottomLeft,
+      bottomRight: bottomRight,
+    );
+  }
+  if (index == pressedIndex) return BorderRadius.circular(pressedRadius);
+  if ((index - pressedIndex).abs() == 1) {
+    if (horizontal) {
+      if (index < pressedIndex) {
+        topRight = outerRadius;
+        bottomRight = outerRadius;
+      } else {
+        topLeft = outerRadius;
+        bottomLeft = outerRadius;
+      }
+    } else if (index < pressedIndex) {
+      bottomLeft = outerRadius;
+      bottomRight = outerRadius;
+    } else {
+      topLeft = outerRadius;
+      topRight = outerRadius;
+    }
+  }
+  return BorderRadius.only(
+    topLeft: topLeft,
+    topRight: topRight,
+    bottomLeft: bottomLeft,
+    bottomRight: bottomRight,
+  );
+}
+
+/// 行优先把 [children] 铺成自适应多列（列数见 [adaptiveColumnsForWidth]）：
+/// 行内等宽、顶部对齐，行间距 / 列间距为 [spacing]；单列时不额外包装，保持原样。
+class AdaptiveListRows extends StatelessWidget {
+  const AdaptiveListRows({
+    super.key,
+    required this.children,
+    this.spacing = 8,
+    this.minItemWidth = kAdaptiveListItemMinWidth,
+    this.maxColumns = kAdaptiveListMaxColumns,
+  });
+
+  final List<Widget> children;
+  final double spacing;
+  final double minItemWidth;
+  final int maxColumns;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final columns = adaptiveColumnsForWidth(
+          constraints.maxWidth,
+          minItemWidth: minItemWidth,
+          spacing: spacing,
+          maxColumns: maxColumns,
+        );
+        if (columns <= 1 || children.isEmpty) {
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: children,
+          );
+        }
+        final rows = <Widget>[];
+        for (var start = 0; start < children.length; start += columns) {
+          if (rows.isNotEmpty) rows.add(SizedBox(height: spacing));
+          rows.add(
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              spacing: spacing,
+              children: [
+                for (var i = 0; i < columns; i++)
+                  Expanded(
+                    // 把条目的 key 提到格子这一层：数据增删时按 key 匹配元素，
+                    // 动画状态跟着条目走，而不是被同位置的下一条目复用
+                    key: start + i < children.length
+                        ? children[start + i].key
+                        : null,
+                    child: start + i < children.length
+                        ? _AdaptiveColumnsScope(
+                            columns: columns,
+                            child: children[start + i],
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+              ],
+            ),
+          );
+        }
+        return Column(mainAxisSize: MainAxisSize.min, children: rows);
+      },
+    );
+  }
+}
+
+/// [AdaptiveListRows] 的 sliver 版本：按行懒构建，只构建可见行。
+class AdaptiveSliverRows extends StatelessWidget {
+  const AdaptiveSliverRows({
+    super.key,
+    required this.itemCount,
+    required this.itemBuilder,
+    this.spacing = 8,
+    this.minItemWidth = kAdaptiveListItemMinWidth,
+    this.maxColumns = kAdaptiveListMaxColumns,
+  });
+
+  final int itemCount;
+  final Widget Function(BuildContext context, int index) itemBuilder;
+  final double spacing;
+  final double minItemWidth;
+  final int maxColumns;
+
+  @override
+  Widget build(BuildContext context) {
+    return SliverLayoutBuilder(
+      builder: (BuildContext context, SliverConstraints constraints) {
+        final columns = adaptiveColumnsForWidth(
+          constraints.crossAxisExtent,
+          minItemWidth: minItemWidth,
+          spacing: spacing,
+          maxColumns: maxColumns,
+        );
+        if (columns <= 1) {
+          return SliverList.builder(
+            itemCount: itemCount,
+            itemBuilder: itemBuilder,
+          );
+        }
+        final rowCount = (itemCount + columns - 1) ~/ columns;
+        return SliverList.builder(
+          itemCount: rowCount,
+          itemBuilder: (context, row) => Padding(
+            padding: EdgeInsets.only(bottom: row == rowCount - 1 ? 0 : spacing),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              spacing: spacing,
+              children: [
+                for (var i = 0; i < columns; i++)
+                  Expanded(
+                    child: row * columns + i < itemCount
+                        ? _AdaptiveColumnsScope(
+                            columns: columns,
+                            child: itemBuilder(context, row * columns + i),
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// MD3 Expressive 连接式列表（Connected）：
+/// - 组外侧圆角 [outerRadius]（默认 16dp），组内相邻处圆角 [innerRadius]（默认 4dp）
+/// - 条目之间用空白间隔（[gap]）而不是分割线
+/// - 按下时该条目圆角做 Shape Morphing（相邻条目的相邻角同步收圆）
+class SegmentedList extends StatefulWidget {
+  const SegmentedList({
+    super.key,
+    required this.children,
+    this.margin = const EdgeInsets.all(4),
+    this.padding = EdgeInsets.zero,
+    this.color,
+    this.outerRadius = 16,
+    this.innerRadius = 4,
+    this.pressedRadius = 28,
+    this.gap = 2,
+    this.adaptive = false,
+    this.adaptiveSpacing = 8,
+    this.minItemWidth = kAdaptiveListItemMinWidth,
+    this.maxColumns = kAdaptiveListMaxColumns,
+  });
+
+  final List<Widget> children;
+  final EdgeInsetsGeometry margin;
+  final EdgeInsetsGeometry padding;
+  final Color? color;
+
+  /// 组两端（外侧）圆角。
+  final double outerRadius;
+
+  /// 组内相邻处的圆角。
+  final double innerRadius;
+
+  /// 按下时该条目的圆角。
+  final double pressedRadius;
+
+  /// 条目之间的空白间隔（替代分割线）。
+  final double gap;
+
+  /// 可用宽度能放下多个 [minItemWidth] 时把条目铺成最多 [maxColumns] 列，
+  /// 每个条目独立成卡（组外侧圆角）；单列时保持原来的连接式整组样式。
+  final bool adaptive;
+
+  /// 多列时的行 / 列间距。
+  final double adaptiveSpacing;
+
+  /// 多列布局中每个条目至少需要的宽度。
+  final double minItemWidth;
+
+  /// 多列布局的最大列数。
+  final int maxColumns;
+
+  @override
+  State<SegmentedList> createState() => _SegmentedListState();
+}
+
+class _SegmentedListState extends State<SegmentedList> {
+  int? _pressedIndex;
+
+  void _setPressed(int? index) {
+    if (_pressedIndex != index && mounted) {
+      setState(() => _pressedIndex = index);
+    }
+  }
+
+  /// 计算单个条目的圆角：组外侧 16dp、组内相邻处 4dp；
+  /// 按下时整体放大，相邻条目的相邻角同步收圆。
+  BorderRadius _radiusFor(int index, int count) => connectedItemRadius(
+    index: index,
+    count: count,
+    outer: widget.outerRadius,
+    inner: widget.innerRadius,
+    pressedIndex: _pressedIndex,
+    pressedRadius: widget.pressedRadius,
+  );
+
+  /// 独立成卡（多列）时的圆角：四周都是外侧圆角，按下时才整体放大到
+  /// [SegmentedList.pressedRadius]。这里不能复用 [_radiusFor]：多列下每个条目
+  /// 自成一组，但下标仍是列表里的真实下标，用整组的 index/count 去算会把
+  /// 除第一个以外的条目当成“组内中间项”而给出内圆角。
+  BorderRadius _standaloneRadius(int index) => BorderRadius.circular(
+    _pressedIndex == index ? widget.pressedRadius : widget.outerRadius,
+  );
+
+  Widget _item(
+    BuildContext context,
+    ColorScheme scheme,
+    int index,
+    int count, {
+    bool standalone = false,
+  }) {
+    return AnimatedContainer(
+      // 把条目的 key 提到外层：单列时 Column 直接按 key 匹配，
+      // 避免数据增删后元素（以及出现动画状态）被同位置的下一条目复用
+      key: widget.children[index].key,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      decoration: BoxDecoration(
+        color: widget.color ?? scheme.surfaceContainerLow,
+        borderRadius: standalone
+            ? _standaloneRadius(index)
+            : _radiusFor(index, count),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Material(
+        type: MaterialType.transparency,
+        child: Listener(
+          onPointerDown: (_) => _setPressed(index),
+          onPointerUp: (_) => _setPressed(null),
+          onPointerCancel: (_) => _setPressed(null),
+          child: Padding(
+            padding: widget.padding,
+            child: widget.children[index],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _singleColumn(BuildContext context, ColorScheme scheme, int count) {
+    return ListEnterGate(
+      itemCount: count,
+      child: Padding(
+        padding: widget.margin,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var i = 0; i < count; i++) ...[
+              if (i > 0) SizedBox(height: widget.gap),
+              _item(context, scheme, i, count),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final count = widget.children.length;
+    if (!widget.adaptive) {
+      return _singleColumn(context, scheme, count);
+    }
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final margin = widget.margin.resolve(Directionality.of(context));
+        final columns = adaptiveColumnsForWidth(
+          math.max(0, constraints.maxWidth - margin.horizontal),
+          minItemWidth: widget.minItemWidth,
+          spacing: widget.adaptiveSpacing,
+          maxColumns: widget.maxColumns,
+        );
+        if (widget.adaptive && columns > 1) {
+          // 多列：每个条目独立成卡（四周都是外侧圆角，按下时整体放大），
+          // 行优先铺开；条目自带的底色已经负责区分，不需要再套分组容器。
+          return ListEnterGate(
+            itemCount: count,
+            child: Padding(
+              padding: widget.margin,
+              child: AdaptiveListRows(
+                spacing: widget.adaptiveSpacing,
+                minItemWidth: widget.minItemWidth,
+                maxColumns: widget.maxColumns,
+                children: [
+                  for (var i = 0; i < count; i++)
+                    _item(context, scheme, i, 1, standalone: true),
+                ],
+              ),
+            ),
+          );
+        }
+        return _singleColumn(context, scheme, count);
+      },
+    );
+  }
+}
+
+/// 底部弹窗里的 MD3E 列表组：[SegmentedList] 的弹窗预设。
+///
+/// - 容器色比弹窗底（`surfaceContainerLow`）**高一档**（`surfaceContainer`），
+///   和设置页「选项 vs 页面底」是同一个关系（越 high 的容器越深）；
+/// - 左右 16dp（M3 列表项的 leading padding 就是 16dp），与弹窗里的标题 /
+///   分组小标题对齐；上下 4dp 保持组内 2dp 间隔的节奏；
+/// - 作为弹窗内容最后一块时用 [endMargin]：底边与左右同值，列表组距弹窗
+///   的左右和底边都是 16dp。
+///
+/// 弹窗里的列表统一用它，样式就不会在各处漂。
+class SheetListGroup extends StatelessWidget {
+  const SheetListGroup({
+    super.key,
+    required this.children,
+    this.margin = const EdgeInsets.fromLTRB(16, 4, 16, 4),
+  });
+
+  final List<Widget> children;
+
+  /// 组外边距：默认 16 / 4；紧跟在按钮组之类的另一组内容后面时，
+  /// 把上边距提到 16（两组内容之间的间距与列表的左右边距同值）。
+  final EdgeInsetsGeometry margin;
+
+  /// 弹窗内容最后一块的组外边距：下边距与左右同值（16dp，M3 间距刻度的
+  /// space200），即列表组到弹窗底边也按窗体边距留 16dp。
+  static const EdgeInsets endMargin = EdgeInsets.fromLTRB(16, 4, 16, 16);
+
+  @override
+  Widget build(BuildContext context) => SegmentedList(
+    color: Theme.of(context).colorScheme.surfaceContainer,
+    margin: margin,
+    children: children,
+  );
+}
+
+/// 对话框里的 MD3E 列表组：[SegmentedList] 的对话框预设。
+///
+/// - 弹窗底是 `surfaceContainerHigh`，列表组用更高一档的
+///   `surfaceContainerHighest`（light 模式下越 high 越深，是同一个关系）；
+/// - 外边距 0：对话框内容边距已按规范留了 24dp，组沿正好落在 24dp 上。
+class DialogListGroup extends StatelessWidget {
+  const DialogListGroup({
+    super.key,
+    required this.children,
+    this.margin = EdgeInsets.zero,
+  });
+
+  final List<Widget> children;
+  final EdgeInsetsGeometry margin;
+
+  @override
+  Widget build(BuildContext context) => SegmentedList(
+    color: Theme.of(context).colorScheme.surfaceContainerHighest,
+    margin: margin,
+    children: children,
+  );
+}
+
+/// 把「固定的若干块内容」放进滚动视图，且**不做懒加载估算**。
+///
+/// `SliverList` + `SliverChildListDelegate` 的 maxScrollExtent 取的是已布局
+/// 子项的平均高度 × 子项数：设置页这种分组高度差异很大的页面，滑动过程中
+/// 平均值不断被修正，`maxScrollExtent` 随之变化，滚动条滑块长度就会一抖一抖。
+/// 内容块数量有限时（设置 / 关于 / 备份 / 首页 / 我的…）用整块布局，滚动范围
+/// 一次算准，滑块长度全程稳定；条目本身在页面 build 里就已经构造好了，
+/// 这里只是不再懒布局，开销可以忽略。
+class SliverColumn extends StatelessWidget {
+  const SliverColumn({super.key, required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return SliverToBoxAdapter(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: children,
+      ),
+    );
+  }
+}
+
+/// [SegmentedList] 的 sliver 版本：条目按需构建（懒加载），只构建 / 布局 /
+/// 绘制可见部分，适合可能很长的列表（分享浏览、收藏、传输）。
+///
+/// 注意：`SliverList` 的 maxScrollExtent 是按已布局子项的平均高度**估算**的，
+/// 子项高度差异大时滑动过程中会不断修正，滚动条滑块长度会跟着抖。
+/// 内容块数量有限（设置、关于这类页面）时改用 [SliverColumn]，滚动范围一次
+/// 算准，滑块长度保持稳定。
+///
+/// 单列时视觉与 [SegmentedList] 完全一致：组外侧 [outerRadius]、
+/// 组内相邻处 [innerRadius]、条目间隔 [gap]、按下时 shape morphing；
+/// 可用宽度足够时同样按 [adaptiveColumnsForWidth] 铺成多列、每个条目独立成卡。
+class SegmentedSliverList extends StatefulWidget {
+  const SegmentedSliverList({
+    super.key,
+    required this.itemCount,
+    required this.itemBuilder,
+    this.findChildIndexCallback,
+    this.trailing,
+    this.margin = const EdgeInsets.all(4),
+    this.color,
+    this.outerRadius = 16,
+    this.innerRadius = 4,
+    this.pressedRadius = 28,
+    this.gap = 2,
+    this.adaptive = false,
+    this.adaptiveSpacing = 8,
+    this.minItemWidth = kAdaptiveListItemMinWidth,
+    this.maxColumns = kAdaptiveListMaxColumns,
+  });
+
+  final int itemCount;
+
+  /// 条目构建器：只对可见区间调用，返回条目内容本身；
+  /// 背景、圆角与按下动效由本组件包在外层。
+  final Widget Function(BuildContext context, int index) itemBuilder;
+
+  /// 数据增删后按 key 找条目的新下标（[SliverChildBuilderDelegate.findChildIndexCallback]）。
+  /// 传了它，幸存的条目会复用原来的元素而不是被重建，
+  /// 删除一批条目时不会重播各自的出现动画（列表一次刷新到位）。
+  final int? Function(Key key)? findChildIndexCallback;
+
+  /// 列表末尾的附加内容（例如分页转圈）：跟随条目一起懒构建。
+  /// 不要另起一条 sliver 承载常驻动画 —— sliver 即使整条在屏幕外
+  /// 也会构建它的第一个子节点，转圈会一直在屏幕外重绘。
+  final Widget? trailing;
+
+  final EdgeInsetsGeometry margin;
+  final Color? color;
+  final double outerRadius;
+  final double innerRadius;
+  final double pressedRadius;
+  final double gap;
+
+  /// 可用宽度足够时是否铺成多列（每个条目独立成卡）。
+  final bool adaptive;
+
+  /// 多列时的行 / 列间距。
+  final double adaptiveSpacing;
+
+  /// 多列布局中每个条目至少需要的宽度。
+  final double minItemWidth;
+
+  /// 多列布局的最大列数。
+  final int maxColumns;
+
+  @override
+  State<SegmentedSliverList> createState() => _SegmentedSliverListState();
+}
+
+class _SegmentedSliverListState extends State<SegmentedSliverList> {
+  int? _pressedIndex;
+
+  void _setPressed(int? index) {
+    if (_pressedIndex != index && mounted) {
+      setState(() => _pressedIndex = index);
+    }
+  }
+
+  BorderRadius _radiusFor(int index, int count) => connectedItemRadius(
+    index: index,
+    count: count,
+    outer: widget.outerRadius,
+    inner: widget.innerRadius,
+    pressedIndex: _pressedIndex,
+    pressedRadius: widget.pressedRadius,
+  );
+
+  BorderRadius _standaloneRadius(int index) => BorderRadius.circular(
+    _pressedIndex == index ? widget.pressedRadius : widget.outerRadius,
+  );
+
+  /// 多列时的一格：key 挂在行内直接子节点上，同一行内的条目能按 key 复用。
+  Widget _adaptiveCell(
+    BuildContext context,
+    ColorScheme scheme,
+    int index,
+    int columns,
+  ) {
+    final child = widget.itemBuilder(context, index);
+    return Expanded(
+      key: child.key,
+      child: _AdaptiveColumnsScope(
+        columns: columns,
+        child: _itemBox(
+          context,
+          scheme,
+          index,
+          1,
+          standalone: true,
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  /// 条目外框：底色、圆角与按下动效。key 由调用方挂在最外层容器上
+  /// （sliver 只认直接子节点的 key，挂在里面等于没挂）。
+  Widget _itemBox(
+    BuildContext context,
+    ColorScheme scheme,
+    int index,
+    int count, {
+    bool standalone = false,
+    required Widget child,
+  }) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      decoration: BoxDecoration(
+        color: widget.color ?? scheme.surfaceContainerLow,
+        borderRadius: standalone
+            ? _standaloneRadius(index)
+            : _radiusFor(index, count),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Material(
+        type: MaterialType.transparency,
+        child: Listener(
+          onPointerDown: (_) => _setPressed(index),
+          onPointerUp: (_) => _setPressed(null),
+          onPointerCancel: (_) => _setPressed(null),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  Widget _singleColumnSliver(
+    BuildContext context,
+    ColorScheme scheme,
+    int count,
+    Widget? trailing,
+    int extra,
+  ) {
+    return ListEnterGate(
+      itemCount: count,
+      child: SliverPadding(
+        padding: widget.margin,
+        sliver: SliverList.builder(
+          itemCount: count + extra,
+          findChildIndexCallback: widget.findChildIndexCallback,
+          itemBuilder: (context, index) {
+            if (index == count) return trailing!;
+            final child = widget.itemBuilder(context, index);
+            return Padding(
+              // 直接子节点的 key：findChildIndexCallback 靠它把条目认回来
+              key: child.key,
+              padding: EdgeInsets.only(
+                bottom: index == count - 1 ? 0 : widget.gap,
+              ),
+              child: _itemBox(context, scheme, index, count, child: child),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final count = widget.itemCount;
+    final trailing = widget.trailing;
+    final extra = trailing == null ? 0 : 1;
+    if (!widget.adaptive) {
+      return _singleColumnSliver(context, scheme, count, trailing, extra);
+    }
+    return SliverLayoutBuilder(
+      builder: (BuildContext context, SliverConstraints constraints) {
+        final margin = widget.margin.resolve(Directionality.of(context));
+        final columns = adaptiveColumnsForWidth(
+          math.max(0, constraints.crossAxisExtent - margin.horizontal),
+          minItemWidth: widget.minItemWidth,
+          spacing: widget.adaptiveSpacing,
+          maxColumns: widget.maxColumns,
+        );
+        if (widget.adaptive && columns > 1) {
+          // 多列：每个条目独立成卡（四周都是外侧圆角），行优先铺开并逐行懒构建
+          final rows = (count + columns - 1) ~/ columns;
+          return ListEnterGate(
+            itemCount: count,
+            child: SliverPadding(
+              padding: widget.margin,
+              sliver: SliverList.builder(
+                itemCount: rows + extra,
+                findChildIndexCallback: widget.findChildIndexCallback,
+                itemBuilder: (context, row) => Padding(
+                  padding: EdgeInsets.only(
+                    bottom: row >= rows - 1 ? 0 : widget.adaptiveSpacing,
+                  ),
+                  child: row == rows && trailing != null
+                      ? trailing
+                      : Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          spacing: widget.adaptiveSpacing,
+                          children: [
+                            for (var column = 0; column < columns; column++)
+                              if (row * columns + column < count)
+                                _adaptiveCell(
+                                  context,
+                                  scheme,
+                                  row * columns + column,
+                                  columns,
+                                )
+                              else
+                                const Expanded(child: SizedBox.shrink()),
+                          ],
+                        ),
+                ),
+              ),
+            ),
+          );
+        }
+        return _singleColumnSliver(context, scheme, count, trailing, extra);
+      },
+    );
+  }
+}
+
+/// 给 [SegmentedSliverList.findChildIndexCallback] 用的查找表：
+/// 按条目 key 反查它在最新列表里的下标。传进列表后，数据增删时幸存的
+/// 条目会连同自己的元素状态一起"搬家"，不会被重建。
+int? Function(Key key) childIndexLookup<T>(
+  List<T> items,
+  Key Function(T item) keyOf,
+) {
+  final indexByKey = <Key, int>{
+    for (var i = 0; i < items.length; i++) keyOf(items[i]): i,
+  };
+  return (key) => indexByKey[key];
+}
+
+/// 列表增删的"入场闸门"：包裹分组列表后，**条目变少的那一帧**里被构建出来
+/// 的条目直接显示，不重播出现动画 —— 批量删除后整体刷新一遍，而不是条目
+/// 一个个闪；新增条目（数量没变少）照常播出现动画。
+///
+/// 多列（adaptive）时每一行会被整体重建，单靠 key 复用救不回来，
+/// 因此这层闸门是必需的。
+class ListEnterGate extends StatefulWidget {
+  const ListEnterGate({
+    super.key,
+    required this.itemCount,
+    required this.child,
+  });
+
+  /// 当前条目数量（不含 trailing）。
+  final int itemCount;
+  final Widget child;
+
+  /// 当前是否处于"列表刚删过条目"的那一帧。
+  static bool suppressIn(BuildContext context) =>
+      reduceMotionOf(context) ||
+      (context
+              .dependOnInheritedWidgetOfExactType<_ListEnterGateScope>()
+              ?.suppress ??
+          false);
+
+  @override
+  State<ListEnterGate> createState() => _ListEnterGateState();
+}
+
+class _ListEnterGateState extends State<ListEnterGate> {
+  bool _suppress = false;
+
+  @override
+  void didUpdateWidget(covariant ListEnterGate oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.itemCount < oldWidget.itemCount) {
+      _suppress = true;
+      // 帧末复位；期间构建出来的条目已经读到 true
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _suppress) setState(() => _suppress = false);
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      _ListEnterGateScope(suppress: _suppress, child: widget.child);
+}
+
+class _ListEnterGateScope extends InheritedWidget {
+  const _ListEnterGateScope({required this.suppress, required super.child});
+
+  final bool suppress;
+
+  @override
+  bool updateShouldNotify(_ListEnterGateScope oldWidget) =>
+      suppress != oldWidget.suppress;
+}
+
+/// 懒加载长列表的入场动画：页面加载后共享一条进度（[progress]），
+/// 按 [index] 错峰淡入 + 轻微上移；动画结束后才构建出来的条目
+/// （滑进来的）直接显示，不会重播 —— 与网盘列表的入场效果一致。
+///
+/// 页面用 [duration] 创建 AnimationController，进入列表时 forward 一次。
+class ListEnterAnimation extends StatelessWidget {
+  const ListEnterAnimation({
+    super.key,
+    required this.progress,
+    required this.index,
+    required this.child,
+  });
+
+  /// 页面持有的共享进度（0..1，动画结束后保持 1）。
+  final Animation<double> progress;
+
+  /// 错峰下标（列表里传当前下标即可）。
+  final int index;
+  final Widget child;
+
+  /// 整组动画时长，页面用它创建 AnimationController。
+  static const Duration duration = Duration(milliseconds: 440);
+
+  static const double _itemDuration = 232;
+  static const double _step = 26;
+
+  @override
+  Widget build(BuildContext context) {
+    // 系统要求少动效：条目直接显示，不做淡入 / 位移
+    if (reduceMotionOf(context)) return child;
+    return AnimatedBuilder(
+      animation: progress,
+      child: child,
+      builder: (context, child) {
+        final delay = index.clamp(0, 8) * _step;
+        final value =
+            ((progress.value * duration.inMilliseconds - delay) / _itemDuration)
+                .clamp(0.0, 1.0);
+        final t = Curves.easeOutCubic.transform(value);
+        return Opacity(
+          opacity: t,
+          child: Transform.translate(
+            offset: Offset(0, 10 * (1 - t)),
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// MD3 Expressive 连接式按钮组（Connected button group）：
+/// 外侧 [outerRadius]（16dp）、组内相邻处 [innerRadius]（4dp），
+/// 条目之间是空白间隔；选中项用主题色（secondaryContainer）强调，
+/// 不把图标替换成对勾，按下时做 shape morphing。
+///
+/// 目前仅支持单选（[selected] 取第一个命中项，重复点选不取消）。
+class ConnectedSegmentedButton<T> extends StatefulWidget {
+  const ConnectedSegmentedButton({
+    super.key,
+    required this.segments,
+    required this.selected,
+    required this.onSelectionChanged,
+    this.margin = EdgeInsets.zero,
+    this.outerRadius = 16,
+    this.innerRadius = 4,
+    this.pressedRadius = 28,
+    this.gap = 2,
+    this.expanded = true,
+  });
+
+  final List<ButtonSegment<T>> segments;
+  final Set<T> selected;
+  final ValueChanged<Set<T>>? onSelectionChanged;
+  final EdgeInsetsGeometry margin;
+  final double outerRadius;
+  final double innerRadius;
+  final double pressedRadius;
+  final double gap;
+
+  /// 是否让每个按钮等分整行宽度。
+  final bool expanded;
+
+  @override
+  State<ConnectedSegmentedButton<T>> createState() =>
+      _ConnectedSegmentedButtonState<T>();
+}
+
+class _ConnectedSegmentedButtonState<T>
+    extends State<ConnectedSegmentedButton<T>> {
+  int? _pressedIndex;
+
+  void _setPressed(int? index) {
+    if (_pressedIndex != index && mounted) {
+      setState(() => _pressedIndex = index);
+    }
+  }
+
+  void _select(T value) {
+    final onChanged = widget.onSelectionChanged;
+    if (onChanged == null || widget.selected.contains(value)) return;
+    onChanged({value});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final count = widget.segments.length;
+    return Padding(
+      padding: widget.margin,
+      child: Row(
+        children: [
+          for (var i = 0; i < count; i++) ...[
+            if (i > 0) SizedBox(width: widget.gap),
+            if (widget.expanded)
+              Expanded(child: _segment(context, scheme, i, count))
+            else
+              _segment(context, scheme, i, count),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _segment(
+    BuildContext context,
+    ColorScheme scheme,
+    int index,
+    int count,
+  ) {
+    final segment = widget.segments[index];
+    final enabled = segment.enabled && widget.onSelectionChanged != null;
+    final selected = widget.selected.contains(segment.value);
+    final radius = connectedItemRadius(
+      index: index,
+      count: count,
+      outer: widget.outerRadius,
+      inner: widget.innerRadius,
+      axis: ConnectedAxis.horizontal,
+      pressedIndex: _pressedIndex,
+      pressedRadius: widget.pressedRadius,
+    );
+    final Color foreground = !enabled
+        ? scheme.onSurface.withValues(alpha: 0.38)
+        : selected
+        ? scheme.onSecondaryContainer
+        : scheme.onSurfaceVariant;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      decoration: BoxDecoration(
+        color: selected ? scheme.secondaryContainer : Colors.transparent,
+        borderRadius: radius,
+        border: Border.all(
+          color: selected ? Colors.transparent : scheme.outlineVariant,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          onTap: enabled ? () => _select(segment.value) : null,
+          onHighlightChanged: (pressed) => _setPressed(pressed ? index : null),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (segment.icon != null) ...[
+                  IconTheme.merge(
+                    data: IconThemeData(size: 18, color: foreground),
+                    child: segment.icon!,
+                  ),
+                  if (segment.label != null) const SizedBox(width: 8),
+                ],
+                if (segment.label != null)
+                  DefaultTextStyle.merge(
+                    style: TextStyle(
+                      color: foreground,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                    ),
+                    child: segment.label!,
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 批量操作进度报告：current 为当前处理到第几项（从 1 起），detail 为当前项说明。
+typedef BatchProgressReport = void Function(int current, String detail);
+
+/// 访问密码编辑结果：enabled 为是否启用，pwd 为密码（关闭时为空）。
+typedef PasswordEditResult = ({bool enabled, String pwd});
+
+/// 访问密码弹窗：顶部「启用访问密码」开关 + 密码输入框。
+/// 打开前应先取到当前是否启用与密码，用于预填开关和输入框；
+/// 关闭开关后确认即表示关闭访问密码。
+///
+/// [maxLength]：蓝奏云文件提取码限 2-6 位，文件夹可以到 12 位（见调用处）。
+/// [freeTier]：普通（免费）账号不能关闭访问密码，开关下面补一行说明。
+Future<PasswordEditResult?> showPasswordDialog(
+  BuildContext context, {
+  required bool enabled,
+  required String pwd,
+  int maxLength = 6,
+  bool freeTier = false,
+}) {
+  final controller = TextEditingController(text: pwd);
+  var isEnabled = enabled;
+  String? error;
+  // 注意：不在弹窗关闭时立即 dispose 控制器——退场动画期间组件仍会重建。
+  return showDialog<PasswordEditResult>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setDialogState) {
+        final l10n = context.l10n;
+        // 带开关 + 密码输入：宽度沿用表单弹窗的算法（见 dialogFormWidth），
+        // 但不走 formDialog——开关要整行铺满弹窗（默认的内容内边距会把波纹
+        // 截短一截），这里把左右 24 的内边距从弹窗挪进内容里自己排。
+        return formDialogPan(
+          context,
+          child: AlertDialog(
+            scrollable: true,
+            title: Text(l10n.accessPassword),
+            // M3 对话框内容边距 24dp；列表组外边距 0，组沿落在 24dp 上
+            contentPadding: const EdgeInsets.fromLTRB(24, 4, 24, 24),
+            content: SizedBox(
+              width: dialogFormWidth(context),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // 开关放进列表组（与选择弹窗同一套样式）
+                  DialogListGroup(
+                    children: [
+                      M3eSwitchTile(
+                        label: l10n.enablePassword,
+                        subtitle: freeTier ? l10n.disablePasswordHint : null,
+                        value: isEnabled,
+                        onChanged: (value) => setDialogState(() {
+                          isEnabled = value;
+                          error = null;
+                        }),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: controller,
+                    enabled: isEnabled,
+                    maxLength: maxLength,
+                    autofocus: isEnabled,
+                    decoration: errorState(
+                      context,
+                      InputDecoration(
+                        border: const OutlineInputBorder(),
+                        hintText: maxLength > 6 ? l10n.pwdHint12 : l10n.pwdHint,
+                      ),
+                      error,
+                    ),
+                    onChanged: (_) {
+                      if (error != null) setDialogState(() => error = null);
+                    },
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: Text(l10n.cancel),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final value = controller.text.trim();
+                  if (isEnabled && value.length < 2) {
+                    setDialogState(() => error = l10n.pwdTooShort);
+                    return;
+                  }
+                  Navigator.of(dialogContext)
+                      .pop((enabled: isEnabled, pwd: isEnabled ? value : ''));
+                },
+                child: Text(l10n.confirm),
+              ),
+            ],
+          ),
+        );
+      },
+    ),
+  );
+}
+
+/// 批量访问密码编辑结果：enabled 为是否启用，filePwd / folderPwd 分别对应
+/// 文件与文件夹的提取码（关闭时都为空）。
+typedef BatchPasswordEditResult = ({
+  bool enabled,
+  String filePwd,
+  String folderPwd,
+});
+
+/// 批量访问密码弹窗（同时选中文件和文件夹时使用）。
+///
+/// 蓝奏云文件提取码只认 2-6 位、文件夹可以到 12 位：同一批里两种条目都有时
+/// 一个输入框没法同时满足，这里给文件夹、文件各一个输入框，浮起的标签分别
+/// 写明用途（文件夹密码 / 文件密码）。关闭「启用访问密码」后确认表示清除。
+Future<BatchPasswordEditResult?> showBatchPasswordDialog(
+  BuildContext context, {
+  bool freeTier = false,
+}) {
+  final folderController = TextEditingController();
+  final fileController = TextEditingController();
+  var isEnabled = true;
+  String? folderError;
+  String? fileError;
+  // 与单个密码弹窗一致：不在关闭时立即 dispose 控制器，退场动画期间还会重建。
+  return showDialog<BatchPasswordEditResult>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setDialogState) {
+        final l10n = context.l10n;
+        return formDialogPan(
+          context,
+          child: AlertDialog(
+            scrollable: true,
+            title: Text(l10n.accessPassword),
+            // M3 对话框内容边距 24dp；列表组外边距 0，组沿落在 24dp 上
+            contentPadding: const EdgeInsets.fromLTRB(24, 4, 24, 24),
+            content: SizedBox(
+              width: dialogFormWidth(context),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // 开关放进列表组（与单选 / 选择弹窗同一套样式）
+                  DialogListGroup(
+                    children: [
+                      M3eSwitchTile(
+                        label: l10n.enablePassword,
+                        subtitle: freeTier ? l10n.disablePasswordHint : null,
+                        value: isEnabled,
+                        onChanged: (value) => setDialogState(() {
+                          isEnabled = value;
+                          folderError = null;
+                          fileError = null;
+                        }),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: folderController,
+                    enabled: isEnabled,
+                    maxLength: 12,
+                    autofocus: isEnabled,
+                    decoration: errorState(
+                      context,
+                      InputDecoration(
+                        border: const OutlineInputBorder(),
+                        labelText: l10n.folderPassword,
+                        hintText: l10n.pwdHint12,
+                      ),
+                      folderError,
+                    ),
+                    onChanged: (_) {
+                      if (folderError != null) {
+                        setDialogState(() => folderError = null);
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: fileController,
+                    enabled: isEnabled,
+                    maxLength: 6,
+                    decoration: errorState(
+                      context,
+                      InputDecoration(
+                        border: const OutlineInputBorder(),
+                        labelText: l10n.filePassword,
+                        hintText: l10n.pwdHint,
+                      ),
+                      fileError,
+                    ),
+                    onChanged: (_) {
+                      if (fileError != null) {
+                        setDialogState(() => fileError = null);
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: Text(l10n.cancel),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final folderPwd = folderController.text.trim();
+                  final filePwd = fileController.text.trim();
+                  if (isEnabled &&
+                      (folderPwd.length < 2 || filePwd.length < 2)) {
+                    setDialogState(() {
+                      folderError = folderPwd.length < 2
+                          ? l10n.pwdTooShort
+                          : null;
+                      fileError = filePwd.length < 2 ? l10n.pwdTooShort : null;
+                    });
+                    return;
+                  }
+                  Navigator.of(dialogContext).pop((
+                    enabled: isEnabled,
+                    filePwd: isEnabled ? filePwd : '',
+                    folderPwd: isEnabled ? folderPwd : '',
+                  ));
+                },
+                child: Text(l10n.confirm),
+              ),
+            ],
+          ),
+        );
+      },
+    ),
+  );
+}
+
+/// 表单弹窗（带输入框）内容的固定宽度。
+///
+/// `AlertDialog` 内部用 `IntrinsicWidth` 量内容宽度，而 `TextField` 的固有宽度
+/// 会跟着输入文本变——多打几个字弹窗就抽动一下。给输入区一个固定宽度就稳住了。
+///
+/// 取值：屏宽减掉对话框左右内边距（`Dialog` 默认 40×2）和内容左右内边距
+/// （M3 弹窗内容 24×2），再夹在 M3 对话框宽度（280–560）对应的内容宽之间。
+double dialogFormWidth(BuildContext context) {
+  final double available = MediaQuery.sizeOf(context).width - 2 * 40 - 2 * 24;
+  return available.clamp(280 - 2 * 24, 560 - 2 * 24).toDouble();
+}
+
+/// 文本字段的 MD3E error state：错误文本作为 supporting text（M3 要求
+/// 错误文本替换普通支持文本，避免多一行把布局顶开），尾部再给一颗 error 色的
+/// fill 风格 Error 图标——M3 强烈推荐错误状态配图标，只靠颜色对色觉障碍
+/// 用户不够。
+///
+/// [error] 为 null（没有错误）时原样返回 [decoration]。
+InputDecoration errorState(
+  BuildContext context,
+  InputDecoration decoration,
+  String? error,
+) {
+  if (error == null) return decoration;
+  return decoration.copyWith(
+    errorText: error,
+    suffixIcon: Icon(
+      Icons.error,
+      fill: 1,
+      color: Theme.of(context).colorScheme.error,
+    ),
+  );
+}
+
+/// 表单弹窗（带输入框的 [AlertDialog]）的统一骨架。
+///
+/// 两个坑都在这里摆平：
+///
+/// - **宽度**：M3 的对话框宽 280–560，`AlertDialog` 内部按内容算固有宽度，
+///   `TextField` 会跟着输入文本变宽——内容固定成 [dialogFormWidth]，多打几个字
+///   弹窗也不会抽动。
+/// - **高度**：`Dialog` 默认按 `viewInsets` 给弹窗加 padding（等价于 Android 的
+///   `adjustResize`），横屏 + 大键盘下会把弹窗压成一条（实测 NOH-AN00：368 −
+///   251 = 117dp 可用）。这里改成原生的 `adjustPan` 手感：弹窗**保持原来的尺寸**
+///   不被压扁，键盘顶上来时整体上移，把当前聚焦的输入框顶到键盘上方（见
+///   [_FormDialogPanShell]）。
+Widget formDialog(
+  BuildContext context, {
+  required Widget title,
+  required Widget content,
+  required List<Widget> actions,
+}) {
+  return formDialogPan(
+    context,
+    child: AlertDialog(
+      scrollable: true,
+      title: title,
+      content: SizedBox(width: dialogFormWidth(context), child: content),
+      actions: actions,
+    ),
+  );
+}
+
+/// 给输入弹窗套上「不被输入法压扁 + 上移聚焦当前输入框」的外壳。
+///
+/// [formDialog] 已经内置；布局另有一套的输入弹窗（WebDAV 配置、Cookie 登录、
+/// 选择目标文件夹等）用这个包一层即可，不用改内部布局。
+Widget formDialogPan(BuildContext context, {required Widget child}) {
+  return _FormDialogPanShell(
+    // 去掉输入法下边距：Dialog 不再据此缩小 / 上推，交给外壳整体平移
+    child: MediaQuery.removeViewInsets(
+      context: context,
+      removeBottom: true,
+      child: child,
+    ),
+  );
+}
+
+/// 「弹窗不被输入法压扁、而是整体上移」的外壳 —— 原生 Android `adjustPan` 的
+/// 手感。Flutter 没有内置等价物：`Dialog` 只会按 `viewInsets` 加 padding（等价于
+/// `adjustResize`），横屏大键盘下弹窗会被压成一条。
+///
+/// 做法：焦点或键盘高度变化后，量出当前聚焦控件的位置，算出「它到键盘顶边还差
+/// 多少」并把弹窗整体上移这么多（键盘收起 / 焦点移走后自动滑回）。
+class _FormDialogPanShell extends StatefulWidget {
+  const _FormDialogPanShell({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_FormDialogPanShell> createState() => _FormDialogPanShellState();
+}
+
+class _FormDialogPanShellState extends State<_FormDialogPanShell> {
+  /// 输入框底边到键盘顶边之间留的余量。
+  static const double _margin = 12;
+
+  /// 目标上移量（正值 = 向上）。
+  double _target = 0;
+
+  /// 动画当前实际应用的平移量。测量时要按它把弹窗的自然位置还原出来，否则会把
+  /// 「已经挪过的位置」当成新基准，越挪越远。
+  double _applied = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    FocusManager.instance.addListener(_scheduleMeasure);
+  }
+
+  @override
+  void dispose() {
+    FocusManager.instance.removeListener(_scheduleMeasure);
+    super.dispose();
+  }
+
+  /// 焦点变化发生在这一帧之后：等画完再量位置。
+  void _scheduleMeasure() {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measure());
+  }
+
+  void _measure() {
+    if (!mounted) return;
+    final MediaQueryData media = MediaQuery.of(context);
+    final double keyboardTop = media.size.height - media.viewInsets.bottom;
+    final Rect? field = _focusedFieldRect();
+    double target = 0;
+    if (field != null) {
+      // field 已经是「平移过」的位置：加回动画当前值才是自然位置
+      target = field.bottom + _applied + _margin - keyboardTop;
+    }
+    // 键盘把可视区域压矮了：能放下时先在剩余区域里居中（上移半个键盘高度），
+    // 聚焦输入框还压在键盘下面时再多移一点
+    target = math.max(media.viewInsets.bottom / 2, target);
+    if (target < 0) target = 0;
+    if ((target - _target).abs() < 0.5) return;
+    setState(() => _target = target);
+  }
+
+  /// 弹窗里当前正在编辑的输入框的全局矩形。
+  ///
+  /// 不能用 `FocusManager.instance.primaryFocus`：弹窗打开时焦点先落在
+  /// `FocusScope` 上，量出来的是整屏（会把弹窗顶飞）。这里在弹窗子树里找
+  /// `hasFocus` 的 [EditableText]。
+  Rect? _focusedFieldRect() {
+    Rect? found;
+    void visit(Element element) {
+      if (found != null) return;
+      final Widget widget = element.widget;
+      if (widget is EditableText && widget.focusNode.hasFocus) {
+        // 用外层 TextField 的框（含装饰的内边距）：只量内部 EditableText 的话，
+        // 输入框下沿会露出到键盘底下一点
+        Element target = element;
+        element.visitAncestorElements((Element ancestor) {
+          if (ancestor.widget is TextField) {
+            target = ancestor;
+            return false;
+          }
+          return true;
+        });
+        final RenderObject? object = target.findRenderObject();
+        if (object is RenderBox && object.hasSize) {
+          found = object.localToGlobal(Offset.zero) & object.size;
+          return;
+        }
+      }
+      element.visitChildren(visit);
+    }
+
+    (context as Element).visitChildren(visit);
+    return found;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 依赖 MediaQuery：键盘高度变化时重建并重新测量
+    MediaQuery.of(context);
+    _scheduleMeasure();
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: _target),
+      // 300ms：系统把输入法高度分两段上报（先键盘、约 100ms 后补上导航栏那一段），
+      // 动画要活到第二段到达，才能连成一次平移而不是「移一下、顿一下、再移一下」
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+      builder: (BuildContext context, double value, Widget? child) {
+        _applied = value;
+        return Transform.translate(offset: Offset(0, -value), child: child);
+      },
+      child: widget.child,
+    );
+  }
+}
+
+/// 批量操作进度弹窗（MD3E 风格，内容居中）：
+/// 圆角进度条 + “1/20” 计数 + 当前处理项，[run] 完成后自动关闭。
+/// 操作进行中不可用返回键关闭。
+Future<void> runBatchWithProgress(
+  BuildContext context, {
+  required String title,
+  required int total,
+  required Future<void> Function(BatchProgressReport report) run,
+}) async {
+  final navigator = Navigator.of(context);
+  final current = ValueNotifier<int>(1);
+  final detail = ValueNotifier<String>('');
+  showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => _BatchProgressDialog(
+      title: title,
+      total: total,
+      current: current,
+      detail: detail,
+    ),
+  );
+  try {
+    await run((value, text) {
+      current.value = value.clamp(1, total);
+      detail.value = text;
+    });
+  } finally {
+    if (navigator.canPop()) navigator.pop();
+  }
+}
+
+class _BatchProgressDialog extends StatelessWidget {
+  const _BatchProgressDialog({
+    required this.title,
+    required this.total,
+    required this.current,
+    required this.detail,
+  });
+
+  final String title;
+  final int total;
+  final ValueListenable<int> current;
+  final ValueListenable<String> detail;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return PopScope(
+      canPop: false,
+      child: AlertDialog(
+        title: Text(title, textAlign: TextAlign.center),
+        content: SizedBox(
+          width: 240,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              ValueListenableBuilder<int>(
+                valueListenable: current,
+                builder: (context, value, _) => Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // 批量操作往往要跑一会儿：MD3E 波浪进度条，长任务不显得呆板。
+                    M3eLinearProgressIndicator(
+                      value: total <= 0
+                          ? null
+                          : (value / total).clamp(0.0, 1.0),
+                      wavy: true,
+                      height: 12,
+                      backgroundColor: scheme.surfaceContainerHighest,
+                    ),
+                    const SizedBox(height: 10),
+                    Text('$value/$total', style: textTheme.labelLarge),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 6),
+              ValueListenableBuilder<String>(
+                valueListenable: detail,
+                builder: (context, text, _) => SizedBox(
+                  width: double.infinity,
+                  child: Text(
+                    text.isEmpty ? ' ' : text,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> showLoadingDialog(BuildContext context, String text) {
+  final theme = Theme.of(context);
+  return showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 24, 20),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // 不确定进度的等待：M3E 环形进度条。
+            const M3eCircularProgressIndicator(size: 28, strokeWidth: 3),
+            const SizedBox(width: 20),
+            Flexible(child: Text(text, style: theme.textTheme.bodyLarge)),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// 查一个分享条目（`ref` = 分享链接）是否已收藏。查不到（例如库不可用）按未收藏。
+Future<bool> isFavoritedByRef(BuildContext context, String ref) async {
+  try {
+    final container = ProviderScope.containerOf(context, listen: false);
+    return await container.read(appDbProvider).isFavorite(ref);
+  } catch (_) {
+    return false;
+  }
+}
+
+/// 收藏 / 取消收藏一个分享条目（`ref` = 分享链接），两端都走这个入口，
+/// 保证「已收藏再点是取消」的语义一致。返回操作后的状态；出错返回 null。
+Future<bool?> toggleFavoriteByRef(
+  BuildContext context, {
+  required String kind,
+  required String name,
+  required String ref,
+  String pwd = '',
+  String size = '',
+  String sharer = '',
+}) async {
+  final db = ProviderScope.containerOf(
+    context,
+    listen: false,
+  ).read(appDbProvider);
+  final l10n = context.l10n;
+  try {
+    if (await db.isFavorite(ref)) {
+      await db.removeFavorite(ref);
+      if (context.mounted) showAppToast(context, l10n.unfavorited);
+      return false;
+    }
+    await db.addFavorite(
+      kind: kind,
+      name: name,
+      ref: ref,
+      pwd: pwd,
+      size: size,
+      sharer: sharer,
+    );
+    if (context.mounted) showAppToast(context, l10n.favorited);
+    return true;
+  } catch (e) {
+    if (context.mounted) showAppToast(context, '$e');
+    return null;
+  }
+}
+
+/// 解析分享链接并把文件加入下载队列。
+///
+/// [showLoading] 为真时弹一个模态「正在解析」对话框（默认，适合一次性入口）；
+/// 属性弹窗这类要在原地显示解析态的入口传 false——不弹框，提示走轻提示
+/// （SnackBar 会被下层的弹窗盖住），弹窗也不会被误关。
+Future<bool> downloadShareFile(
+  BuildContext context, {
+  required String url,
+  String pwd = '',
+  String? fallbackName,
+  bool showLoading = true,
+
+  /// 提取码缺失 / 错误时调用：返回新提取码就用它重试一次，返回 null 放弃。
+  ///
+  /// 属性弹窗传这个回调：补密码后继续下载，并把新密码同步到收藏夹。
+  Future<String?> Function()? askPassword,
+}) async {
+  final container = ProviderScope.containerOf(context, listen: false);
+  final client = container.read(lanzouClientRegistryProvider).publicClient;
+  final transfers = container.read(transferManagerProvider);
+  final navigator = Navigator.of(context);
+  final messenger = ScaffoldMessenger.of(context);
+  final l10n = context.l10n;
+  void notify(String message) {
+    if (showLoading) {
+      messenger.showSnackBar(SnackBar(content: Text(message)));
+    } else {
+      showAppToast(context, message);
+    }
+  }
+
+  if (showLoading) showLoadingDialog(context, l10n.resolvingDownload);
+  var currentPwd = pwd;
+  // 只补一次密码：用户改完仍不对就按错误提示，避免反复弹框
+  var asked = false;
+  while (true) {
+    String? passwordError;
+    try {
+      final direct = await client.resolveFileShare(url, pwd: currentPwd);
+      if (showLoading) navigator.pop();
+      transfers.addDownload(
+        url: direct.url,
+        name: direct.name.isEmpty ? (fallbackName ?? 'download') : direct.name,
+        referer: url,
+        pwd: currentPwd,
+        via: client,
+      );
+      notify(l10n.addedToQueue);
+      return true;
+    } on NeedPasswordException catch (e) {
+      passwordError = l10n.lanzouError(e);
+    } on WrongPasswordException catch (e) {
+      passwordError = l10n.lanzouError(e);
+    } on LanzouException catch (e) {
+      if (showLoading) navigator.pop();
+      notify(l10n.lanzouError(e));
+      return false;
+    } catch (e) {
+      if (showLoading) navigator.pop();
+      notify(l10n.resolveFailed('$e'));
+      return false;
+    }
+    // 需要提取码 / 提取码错误
+    if (askPassword == null || asked || !context.mounted) {
+      if (showLoading) navigator.pop();
+      notify(passwordError);
+      return false;
+    }
+    asked = true;
+    if (showLoading) navigator.pop();
+    final next = await askPassword();
+    if (next == null || next.trim().isEmpty) return false;
+    if (!context.mounted) return false;
+    currentPwd = next.trim();
+    if (showLoading) showLoadingDialog(context, l10n.resolvingDownload);
+  }
+}
+
+/// 批量解析分享文件并加入下载队列（分享文件夹多选用）。
+Future<void> downloadShareFiles(
+  BuildContext context, {
+  required List<String> urls,
+  required List<String> names,
+  String pwd = '',
+}) async {
+  if (urls.isEmpty || urls.length != names.length) return;
+  final container = ProviderScope.containerOf(context, listen: false);
+  final client = container.read(lanzouClientRegistryProvider).publicClient;
+  final transfers = container.read(transferManagerProvider);
+  final messenger = ScaffoldMessenger.of(context);
+  final l10n = context.l10n;
+  var added = 0;
+  var failed = 0;
+  await runBatchWithProgress(
+    context,
+    title: l10n.batchDownload,
+    total: urls.length,
+    run: (report) async {
+      for (var i = 0; i < urls.length; i++) {
+        report(i + 1, names[i]);
+        try {
+          final direct = await client.resolveFileShare(urls[i], pwd: pwd);
+          transfers.addDownload(
+            url: direct.url,
+            name: direct.name.isEmpty ? names[i] : direct.name,
+            referer: urls[i],
+            pwd: pwd,
+            via: client,
+          );
+          added += 1;
+        } catch (_) {
+          failed += 1;
+        }
+      }
+    },
+  );
+  if (!context.mounted) return;
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text(
+        failed == 0
+            ? l10n.addedDownloads(added)
+            : l10n.addedDownloadsPartial(added, failed),
+      ),
+    ),
+  );
+}

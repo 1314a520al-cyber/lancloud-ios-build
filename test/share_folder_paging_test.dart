@@ -1,0 +1,377 @@
+import 'package:material_ui/material_ui.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:lancloud/core/api/lanzou_client.dart';
+import 'package:lancloud/core/api/lanzou_client_registry.dart';
+import 'package:lancloud/core/api/models.dart';
+import 'package:lancloud/core/app_environment.dart';
+import 'package:lancloud/core/cache_page_settings_state.dart';
+import 'package:lancloud/core/data/app_db_provider.dart';
+import 'package:lancloud/core/navigation_appearance_settings_state.dart';
+import 'package:lancloud/core/navigation_state.dart';
+import 'package:lancloud/core/transfer/transfer_manager_provider.dart';
+import 'package:lancloud/l10n/app_localizations.dart';
+import 'package:lancloud/l10n/app_localizations_zh.dart';
+import 'package:lancloud/ui/common.dart';
+import 'package:lancloud/ui/share_folder_page.dart';
+
+import 'package:lancloud/l10n/delegates.dart';
+
+import 'transfer_dependencies_test.dart'
+    show buildTransferManagerForEnvironment;
+
+/// 记录分页请求的假客户端：第二页固定返回一个文件并到底。
+class _FakeClient extends LanzouClient {
+  _FakeClient() : super(uid: '0');
+
+  final List<int> calls = [];
+
+  @override
+  Future<({List<ShareFileItem> files, bool hasMore})> fetchShareFolderFiles(
+    ShareFolderPaging paging,
+    int page,
+  ) async {
+    calls.add(page);
+    if (page == 2) {
+      return (
+        files: [
+          ShareFileItem(
+            name: 'second-page.txt',
+            time: '',
+            size: '1 M',
+            url: 'https://example.com/b',
+          ),
+        ],
+        hasMore: false,
+      );
+    }
+    return (files: const <ShareFileItem>[], hasMore: false);
+  }
+}
+
+/// 可配置失败次数的分页客户端：第二页先失败 [failures] 次再返回「到底」。
+class _FlakyClient extends LanzouClient {
+  _FlakyClient({this.failures = 0}) : super(uid: '0');
+
+  int failures;
+  final List<int> calls = [];
+
+  @override
+  Future<({List<ShareFileItem> files, bool hasMore})> fetchShareFolderFiles(
+    ShareFolderPaging paging,
+    int page,
+  ) async {
+    calls.add(page);
+    if (page == 2 && failures > 0) {
+      failures -= 1;
+      throw const LanzouException('网络抖动');
+    }
+    return (files: const <ShareFileItem>[], hasMore: false);
+  }
+}
+
+ShareFolderPaging _paging() => ShareFolderPaging(
+  base: 'https://example.com',
+  referer: 'https://example.com/s/abc',
+  fid: '123',
+  lx: '2',
+  t: '1700000000',
+  k: 'abcdefghijklmnop',
+);
+
+FolderShareDetail _folder({int firstPageFiles = 20}) => FolderShareDetail(
+  name: '测试分享',
+  files: [
+    for (var i = 0; i < firstPageFiles; i++)
+      ShareFileItem(
+        name: 'file$i.txt',
+        time: '2026-10-01',
+        size: '1 M',
+        url: 'https://example.com/f$i',
+      ),
+  ],
+  paging: _paging(),
+  hasMore: true,
+);
+
+Future<void> pumpPage(
+  WidgetTester tester, {
+  required AppEnvironment environment,
+  required LanzouClient client,
+  required FolderShareDetail folder,
+}) async {
+  final transfers = buildTransferManagerForEnvironment(environment);
+  final clients = LanzouClientRegistry(factory: (_) => client);
+  tester.view.devicePixelRatio = 1.0;
+  tester.view.physicalSize = const Size(400, 700);
+  addTearDown(tester.view.reset);
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        transferManagerProvider.overrideWithValue(transfers),
+        lanzouClientRegistryProvider.overrideWithValue(clients),
+        appDbProvider.overrideWithValue(environment.db),
+        cachePageSettingsStateProvider.overrideWithValue(
+          environment.cachePageSettings,
+        ),
+        navigationAppearanceSettingsStateProvider.overrideWithValue(
+          environment.navigationAppearanceSettings,
+        ),
+        navigationStateProvider.overrideWithValue(environment.navigation),
+      ],
+      child: MaterialApp(
+        localizationsDelegates: appLocalizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        locale: const Locale('zh'),
+        home: ShareFolderPage(
+          folder: folder,
+          link: 'https://example.com/s/abc',
+          pwd: '',
+        ),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
+void main() {
+  testWidgets('分享文件夹：解析后只进页面，滑到底才加载下一页', (tester) async {
+    final client = _FakeClient();
+    final environment = AppEnvironment();
+    addTearDown(environment.dispose);
+    await pumpPage(
+      tester,
+      environment: environment,
+      client: client,
+      folder: _folder(),
+    );
+
+    // 首屏已经填满：不应该提前请求下一页
+    expect(client.calls, isEmpty);
+    expect(find.text('second-page.txt'), findsNothing);
+
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -1200));
+    await tester.pumpAndSettle();
+
+    expect(client.calls, contains(2));
+    expect(find.text('second-page.txt'), findsOneWidget);
+  });
+
+  testWidgets('分享文件夹：开启「自动加载全部目录内容」后后台补齐全部分页', (tester) async {
+    final client = _FakeClient();
+    final environment = AppEnvironment();
+    environment.settingsState.store.loadAllPages = true;
+    addTearDown(environment.dispose);
+    await pumpPage(
+      tester,
+      environment: environment,
+      client: client,
+      folder: _folder(),
+    );
+
+    expect(client.calls, contains(2));
+    // 列表是懒加载的：新一页在屏幕外，先滚到底再确认它已经渲染出来
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -2000));
+    await tester.pumpAndSettle();
+    expect(find.text('second-page.txt'), findsOneWidget);
+  });
+
+  testWidgets('分享文件夹：长列表只构建可见条目（懒加载）', (tester) async {
+    final client = _FakeClient();
+    final environment = AppEnvironment();
+    addTearDown(environment.dispose);
+    await pumpPage(
+      tester,
+      environment: environment,
+      client: client,
+      folder: _folder(firstPageFiles: 400),
+    );
+
+    // 400 条里只构建屏幕附近的少量条目，而不是全部常驻
+    expect(find.byType(Md3ListItem).evaluate().length, lessThan(40));
+    expect(client.calls, isEmpty);
+  });
+
+  testWidgets('分享文件夹：第一页不满一屏时自动补页，不留常驻的加载转圈', (tester) async {
+    final client = _FakeClient();
+    final environment = AppEnvironment();
+    addTearDown(environment.dispose);
+    // 只有 3 个文件：内容明显不足一屏（修复前 maxScrollExtent > 0 时不会补页，
+    // 底部“加载下一页”的转圈会一直停着，直到用户滑动）
+    await pumpPage(
+      tester,
+      environment: environment,
+      client: client,
+      folder: _folder(firstPageFiles: 3),
+    );
+
+    expect(client.calls, contains(2));
+    expect(find.text('second-page.txt'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text(AppLocalizationsZh().reachedEnd), findsOneWidget);
+  });
+
+  testWidgets('分享文件夹：id 为 -1 的失效文件照样显示，但不参与多选 / 下载', (tester) async {
+    final l10n = AppLocalizationsZh();
+    final client = _FakeClient();
+    final environment = AppEnvironment();
+    addTearDown(environment.dispose);
+    await pumpPage(
+      tester,
+      environment: environment,
+      client: client,
+      folder: FolderShareDetail(
+        name: '测试分享',
+        files: [
+          ShareFileItem(
+            name: 'a.apk',
+            time: '2026-10-01',
+            size: '1 M',
+            url: 'https://example.com/a',
+          ),
+          ShareFileItem(
+            name: 'b.apk',
+            time: '2026-10-01',
+            size: '1 M',
+            url: 'https://example.com/b',
+          ),
+          ShareFileItem(
+            name: '***.apk',
+            time: '2024-12-25',
+            size: '30.5 M',
+            url: '',
+            invalid: true,
+          ),
+        ],
+        paging: _paging(),
+        hasMore: false,
+      ),
+    );
+
+    // 失效文件照样列出来，并在副标题里标注
+    expect(find.text('***.apk'), findsOneWidget);
+    expect(find.textContaining(l10n.fileInvalid), findsOneWidget);
+
+    // 点开属性弹窗：提示「文件已失效」，操作项全部禁用
+    await tester.tap(find.text('***.apk'));
+    await tester.pumpAndSettle();
+    // 提示用 Error container 卡片（图标 + 文字都是 on error container）
+    expect(find.byType(ErrorHintCard), findsOneWidget);
+    expect(
+      tester.widget<ErrorHintCard>(find.byType(ErrorHintCard)).margin,
+      const EdgeInsets.fromLTRB(16, 12, 16, 4),
+    );
+    expect(find.text(l10n.fileInvalid), findsOneWidget);
+    final downloadTile = tester.widget<ListTile>(
+      find
+          .ancestor(
+            of: find.text(l10n.download),
+            matching: find.byType(ListTile),
+          )
+          .first,
+    );
+    expect(downloadTile.enabled, isFalse);
+
+    // 关掉弹窗后长按有效条目进入多选：全选只包含可下载的条目
+    await tester.tapAt(const Offset(5, 5));
+    await tester.pumpAndSettle();
+    await tester.longPress(find.text('a.apk'));
+    await tester.pumpAndSettle();
+    expect(find.text(l10n.selectedCount(1)), findsOneWidget);
+
+    // 全选：只选中两个可下载条目（失效项不参与）
+    await tester.tap(find.byTooltip(l10n.selectAll));
+    await tester.pumpAndSettle();
+    expect(
+      find.text(l10n.selectedCount(2)),
+      findsOneWidget,
+      reason: '失效条目不参与批量操作',
+    );
+
+    // 逐个取消，选中数归零时自动退出多选
+    await tester.tap(find.text('a.apk'));
+    await tester.pumpAndSettle();
+    expect(find.text(l10n.selectedCount(1)), findsOneWidget);
+    await tester.tap(find.text('b.apk'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip(l10n.selectAll), findsNothing);
+  });
+
+  testWidgets('分享文件夹：搜索时不显示加载转圈，改为提示结果可能不全', (tester) async {
+    final client = _FakeClient();
+    final environment = AppEnvironment();
+    addTearDown(environment.dispose);
+    // 首页有 20 个文件、还有下一页没加载：搜索只在已加载内容里过滤
+    await pumpPage(
+      tester,
+      environment: environment,
+      client: client,
+      folder: _folder(),
+    );
+    expect(client.calls, isEmpty);
+
+    await tester.tap(find.byTooltip('搜索'));
+    await tester.pumpAndSettle();
+    // 只匹配 file0 一条：尾部提示会渲染在可见区域内
+    await tester.enterText(find.byType(TextField), 'file0');
+    await tester.pumpAndSettle();
+
+    // 未全部加载 → 提示可能不全，而不是「加载下一页」的转圈
+    expect(find.text(AppLocalizationsZh().searchIncomplete), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+
+    // 搜索期间不会继续补页（滑动到搜索结果的底部也不会请求下一页）
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -1200));
+    await tester.pumpAndSettle();
+    expect(client.calls, isEmpty);
+    expect(find.text(AppLocalizationsZh().searchIncomplete), findsOneWidget);
+  });
+
+  // 回归：内容不满一屏时要自动补页才能知道「到底了」。补页请求失败时
+  // 以前会一直挂着转圈，要用户自己滑一下才恢复；现在会自动退避重试。
+  testWidgets('分享文件夹：自动补页失败会自己重试，不会停在转圈上', (tester) async {
+    final client = _FlakyClient(failures: 1);
+    final environment = AppEnvironment();
+    addTearDown(environment.dispose);
+    await pumpPage(
+      tester,
+      environment: environment,
+      client: client,
+      folder: _folder(firstPageFiles: 3),
+    );
+
+    // 第一次补页失败后会自动重试（失败期间底部继续显示加载指示，
+    // 不会闪一下「重试」让用户去点）；重试成功即到底，全程不需要用户滑动
+    expect(client.calls.length, greaterThanOrEqualTo(2));
+    expect(find.text(AppLocalizationsZh().retry), findsNothing);
+    expect(find.text(AppLocalizationsZh().reachedEnd), findsOneWidget);
+  });
+
+  testWidgets('分享文件夹：补页一直失败时给「重试」入口，而不是常驻转圈', (tester) async {
+    final client = _FlakyClient(failures: 99);
+    final environment = AppEnvironment();
+    addTearDown(environment.dispose);
+    await pumpPage(
+      tester,
+      environment: environment,
+      client: client,
+      folder: _folder(firstPageFiles: 3),
+    );
+
+    // 自动重试有限次（首次 + 3 次重试）后停下来
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 800));
+    }
+    await tester.pumpAndSettle();
+    expect(client.calls.length, 4);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text(AppLocalizationsZh().retry), findsOneWidget);
+
+    // 网络恢复后点「重试」：继续把剩余分页拉完
+    client.failures = 0;
+    await tester.tap(find.text(AppLocalizationsZh().retry));
+    await tester.pumpAndSettle();
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text(AppLocalizationsZh().reachedEnd), findsOneWidget);
+  });
+}

@@ -1,0 +1,175 @@
+import 'dart:typed_data';
+
+import 'package:dio/dio.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:lancloud/core/api/lanzou_client.dart';
+import 'package:lancloud/core/api/models.dart';
+
+/// 按脚本依次返回响应体的假适配器（记录请求次数与参数）。
+class _ScriptedAdapter implements HttpClientAdapter {
+  _ScriptedAdapter(this.bodies);
+
+  /// 第 N 次请求用第 N 个响应；用完后一直用最后一个。
+  final List<String> bodies;
+  final List<Map<String, dynamic>> requests = [];
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    requests.add(Map<String, dynamic>.from(options.data as Map));
+    final body = bodies[(requests.length - 1).clamp(0, bodies.length - 1)];
+    return ResponseBody.fromString(
+      body,
+      200,
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+ShareFolderPaging _paging() => ShareFolderPaging(
+  base: 'https://example.com',
+  referer: 'https://example.com/s/abc',
+  fid: '123',
+  lx: '2',
+  t: '1700000000',
+  k: 'abcdefghijklmnop',
+);
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() => LanzouClient.requestInterval = Duration.zero);
+  tearDown(
+    () => LanzouClient.requestInterval = const Duration(milliseconds: 300),
+  );
+
+  // 真机上「从收藏进分享文件夹、自动补下一页」时偶发失败、底部闪「重试」：
+  // 抓到的错误是「获取分享文件列表失败」（服务端暂时给不出数据）。
+  // 这类「稍后再试」应该在客户端内部消化掉，重试同一页。
+  test('分享分页遇到服务端忙 / 解析失败会自动重试同一页', () async {
+    final client = LanzouClient(uid: '0');
+    final adapter = _ScriptedAdapter([
+      '{"zt":4}', // 服务端要求稍后重试
+      'not json', // 挑战页 / 空响应这类解析失败
+      '{"zt":1,"text":[{'
+          '"id":"iabc123","name_all":"a.zip","size":"1 M","time":"2024-01-01"'
+          '}]}',
+    ]);
+    client.dio.httpClientAdapter = adapter;
+
+    final result = await client.fetchShareFolderFiles(_paging(), 2);
+
+    expect(adapter.requests.length, 3, reason: '前两次失败都要自动重试同一页');
+    expect(adapter.requests.every((r) => '${r['pg']}' == '2'), isTrue);
+    expect(result.files.single.name, 'a.zip');
+    // 本页只有 1 条（不足 50）→ 直接判定到底，不用再请求下一页
+    expect(result.hasMore, isFalse);
+  });
+
+  // 分享页 JS：data.length < 50 时隐藏「更多」→ 满 50 条才可能有下一页
+  test('本页满 50 条才认为可能还有下一页', () async {
+    final client = LanzouClient(uid: '0');
+    final files = [
+      for (var i = 0; i < 50; i++)
+        '{"id":"i$i","name_all":"f$i.zip","size":"1 M","time":"2024-01-01"}',
+    ].join(',');
+    final adapter = _ScriptedAdapter(['{"zt":1,"text":[$files]}']);
+    client.dio.httpClientAdapter = adapter;
+
+    final result = await client.fetchShareFolderFiles(_paging(), 1);
+
+    expect(result.files.length, 50);
+    expect(result.hasMore, isTrue);
+  });
+
+  // 真机：收藏的分享文件夹第一页 50 条里有 1 条被服务端屏蔽的文件
+  // （id 为 -1，名字只给 ***.apk）。以前这条被直接丢掉，剩下 49 条又被
+  // 「不满 50 条就没有下一页」的规则判成最后一页，页面再也翻不了页。
+  test('id 为 -1 的屏蔽文件照样返回，且不影响「还有下一页」的判断', () async {
+    final client = LanzouClient(uid: '0');
+    final files = [
+      for (var i = 0; i < 49; i++)
+        '{"id":"i$i","name_all":"f$i.apk","size":"1 M","time":"2024-12-25"}',
+      '{"id":"-1","name_all":"***.apk","size":"30.5 M","time":"2024-12-25"}',
+    ].join(',');
+    final adapter = _ScriptedAdapter(['{"zt":1,"text":[$files]}']);
+    client.dio.httpClientAdapter = adapter;
+
+    final result = await client.fetchShareFolderFiles(_paging(), 1);
+
+    expect(result.files.length, 50, reason: '屏蔽项要占位显示，不能丢');
+    expect(result.files.where((f) => f.invalid).length, 1);
+    expect(result.files.last.name, '***.apk');
+    expect(result.files.last.invalid, isTrue);
+    expect(result.files.last.url, isEmpty, reason: '失效条目没有可用的下载地址');
+    expect(result.hasMore, isTrue, reason: '按服务端返回的 50 条判断，还有下一页');
+  });
+
+  test('分享分页拿到 zt=2 表示已到底', () async {
+    final client = LanzouClient(uid: '0');
+    final adapter = _ScriptedAdapter(['{"zt":2}']);
+    client.dio.httpClientAdapter = adapter;
+
+    final result = await client.fetchShareFolderFiles(_paging(), 2);
+
+    expect(adapter.requests.length, 1);
+    expect(result.files, isEmpty);
+    expect(result.hasMore, isFalse);
+  });
+
+  test('服务端给了明确错误信息时立即报错，不做无谓重试', () async {
+    final client = LanzouClient(uid: '0');
+    final adapter = _ScriptedAdapter(['{"zt":0,"info":"文件不存在"}']);
+    client.dio.httpClientAdapter = adapter;
+
+    await expectLater(
+      client.fetchShareFolderFiles(_paging(), 2),
+      throwsA(
+        isA<LanzouException>().having((e) => e.message, 'message', '文件不存在'),
+      ),
+    );
+    expect(adapter.requests.length, 1);
+  });
+
+  // 真机上抓到的就是这条：服务端回「请刷新，重试N」，
+  // 要求客户端把 N 填回 rep 参数再请求一次。
+  test('「请刷新，重试N」会按服务端给的 rep 重试', () async {
+    final client = LanzouClient(uid: '0');
+    final adapter = _ScriptedAdapter(['{"zt":0,"info":"请刷新，重试1"}', '{"zt":2}']);
+    client.dio.httpClientAdapter = adapter;
+
+    final result = await client.fetchShareFolderFiles(_paging(), 2);
+
+    expect(adapter.requests.length, 2);
+    expect(adapter.requests.first['rep'], '0');
+    expect(adapter.requests.last['rep'], '1', reason: '要把服务端给的 N 填回 rep');
+    expect(result.hasMore, isFalse);
+  });
+
+  test('持续返回 zt=4 时按上限重试后返回统一错误', () async {
+    final client = LanzouClient(uid: '0');
+    final adapter = _ScriptedAdapter(['{"zt":4}']);
+    client.dio.httpClientAdapter = adapter;
+
+    await expectLater(
+      client.fetchShareFolderFiles(_paging(), 2),
+      throwsA(
+        isA<LanzouException>().having(
+          (e) => e.code,
+          'code',
+          LanzouErrorCode.shareFileListFailed,
+        ),
+      ),
+    );
+
+    expect(adapter.requests.length, 4, reason: '首次请求加 3 次退避重试');
+  });
+}

@@ -1,3 +1,32 @@
+# LanCloud iOS
+
+LanCloud 蓝奏云第三方客户端 iOS 版。
+
+## 下载
+
+最新版本：[v1.0.1](https://github.com/1314a520al-cyber/LanCloud-iOS/releases/tag/v1.0.1)
+
+下载 `LanCloud-v1.0.1.ipa`，用 AltStore / Sideloadly 等工具自签安装。
+
+## 更新日志
+
+### v1.0.1
+- **新增** 文叔叔原生功能：登录（手机号+验证码）、上传、取件下载
+- **新增** 蓝奏云回收站原生页面：列表、恢复、彻底删除、清空
+- **新增** 文叔叔右上角圆形头像，点击弹出账号菜单
+- **修复** 模拟器构建 IPA 在真机上闪退的问题
+- **修复** material_ui 包图标不存在的编译错误
+- **修复** shared_preferences_foundation 与 Xcode 16 不兼容的问题
+- **修复** receive_sharing_intent 与 Xcode 16 不兼容的问题
+
+### v1.0.0
+- 第一个构建版本（模拟器模式，不能在真机上运行）
+
+## 反馈邮箱
+sxewku6006@163.com
+
+---
+
 # LanCloud（蓝云）
 
 蓝奏云第三方 Flutter 客户端，使用 DeepSeek + Codex 辅助开发与验证。

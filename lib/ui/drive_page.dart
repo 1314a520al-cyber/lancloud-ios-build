@@ -2290,6 +2290,15 @@ class _DrivePageState extends ConsumerState<DrivePage>
       case _FolderMenuAction.editInfo:
         await _editFolderInfoFromMenu(folder);
       case _FolderMenuAction.pinHome:
+        // 真正固定到首页
+        final db = ref.read(appDbProvider);
+        final uid = ref.read(accountStateProvider).store.activeUid ?? '';
+        await db.addPin(
+          account: uid,
+          name: folder.name,
+          ref: folder.id,
+          path: _path.where((p) => p.id != folder.id).map((p) => p.name).join('/'),
+        );
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('已固定 ${folder.name} 到首页')),

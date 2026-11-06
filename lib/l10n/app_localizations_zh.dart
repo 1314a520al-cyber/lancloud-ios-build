@@ -2384,7 +2384,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get aboutProjectHome => '项目主页';
 
   @override
-  String get aboutMyRepo => '我的仓库';
+  String get aboutMyRepo => 'iOS 仓库';
 
   @override
   String get aboutSubmitIssue => '提交 Issue';

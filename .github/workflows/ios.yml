@@ -17,13 +17,18 @@ jobs:
       - run: flutter --version && xcodebuild -version
       - run: flutter pub get
       - name: Build iOS
-        run: flutter build ios --simulator --debug --build-name=1.0.2 --build-number=2
+        env:
+          CODE_SIGNING_ALLOWED: NO
+          CODE_SIGNING_REQUIRED: NO
+          CODE_SIGNING_IDENTITY: ""
+          EXPANDED_CODE_SIGN_IDENTITY: ""
+        run: flutter build ios --release --no-codesign --build-name=1.0.3 --build-number=3
       - name: Package IPA
         if: always()
         run: |
-          ls -lh build/ios/iphonesimulator/
+          ls -lh build/ios/iphoneos/
           mkdir -p Payload
-          cp -r build/ios/iphonesimulator/Runner.app Payload/
+          cp -r build/ios/iphoneos/Runner.app Payload/
           zip -qry LanCloud-unsigned.ipa Payload
           ls -lh LanCloud-unsigned.ipa
       - uses: actions/upload-artifact@v4

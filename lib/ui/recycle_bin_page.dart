@@ -55,14 +55,25 @@ class _RecycleBinPageState extends riverpod.ConsumerState<RecycleBinPage> {
       // HTML 解析：提取回收站文件列表
       final html = resp.data.toString();
       final List<_RecycleFile> files = [];
-      // 正则提取 file_id 和文件名
-      final regex = RegExp(r'file_id=(\d+).*?<td[^>]*>([^<]+)</td>');
+      // 正则提取 file_id 和文件名（改进版）
+      final regex = RegExp(r'file_id=(\d+)[^>]*>.*?<a[^>]*>([^<]+)</a>', dotAll: true);
       for (final match in regex.allMatches(html)) {
         files.add(_RecycleFile(
           id: match.group(1)!,
           name: match.group(2)!.trim(),
           size: '',
         ));
+      }
+      // 如果上面的正则没匹配到，用更宽松的正则
+      if (files.isEmpty) {
+        final regex2 = RegExp(r'file_id=(\d+)');
+        for (final match in regex2.allMatches(html)) {
+          files.add(_RecycleFile(
+            id: match.group(1)!,
+            name: '文件 ${match.group(1)}',
+            size: '',
+          ));
+        }
       }
       setState(() {
         _files = files;

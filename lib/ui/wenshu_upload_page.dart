@@ -33,10 +33,25 @@ class _WenshuUploadPageState extends riverpod.ConsumerState<WenshuUploadPage> {
   }
 
   Future<void> _pickFile() async {
-    // TODO: iOS 上传功能暂时占位
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('上传功能开发中')),
-    );
+    try {
+      final result = await FilePicker.platform.pickFiles();
+      if (result != null && result.files.isNotEmpty) {
+        final file = result.files.first;
+        setState(() {
+          _files.add(_FileItem(
+            name: file.name,
+            path: file.path,
+            size: file.size ?? 0,
+          ));
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('选择文件失败：$e')),
+        );
+      }
+    }
   }
 
   Future<void> _upload() async {

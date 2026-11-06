@@ -1,184 +1,124 @@
-import 'package:material_ui/material_ui.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
-import 'package:flutter/services.dart';
+import 'dart:async';
+
+import 'package:material_ui/material_ui.dart' hide Icons;
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/api/wenshu_auth.dart';
 import '../core/api/wenshu_client.dart';
-import '../l10n/l10n.dart';
 import 'common.dart';
 import 'm3e.dart';
 
-/// 文叔叔登录页（手机号+验证码）。
-class WenshuLoginPage extends riverpod.ConsumerStatefulWidget {
+/// 文叔叔网页登录页（和蓝奏云一样，用 WebView 登录后自动获取 token）。
+class WenshuLoginPage extends ConsumerStatefulWidget {
   const WenshuLoginPage({super.key});
 
   @override
-  riverpod.ConsumerState<WenshuLoginPage> createState() => _WenshuLoginPageState();
+  ConsumerState<WenshuLoginPage> createState() => _WenshuLoginPageState();
 }
 
-class _WenshuLoginPageState extends riverpod.ConsumerState<WenshuLoginPage> {
-  final _phoneController = TextEditingController();
-  final _codeController = TextEditingController();
-  bool _loading = false;
-  int _countdown = 0;
-  late final WenshuClient _client;
+class _WenshuLoginPageState extends ConsumerState<WenshuLoginPage> {
+  final String _loginUrl = 'https://www.wenshushu.cn/login';
 
-  @override
-  void initState() {
-    super.initState();
-    _client = WenshuClient();
-  }
-
-  @override
-  void dispose() {
-    _phoneController.dispose();
-    _codeController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _sendCode() async {
-    if (_phoneController.text.length != 11) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请输入正确的手机号')),
-      );
-      return;
-    }
-    try {
-      await _client.sendCode(_phoneController.text);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('验证码已发送')),
-        );
-        setState(() => _countdown = 60);
-        // 倒计时
-        Future.doWhile(() async {
-          await Future.delayed(const Duration(seconds: 1));
-          if (mounted && _countdown > 0) {
-            setState(() => _countdown--);
-            return _countdown > 0;
-          }
-          return false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('发送失败：$e')),
-        );
-      }
-    }
-  }
-
-  Future<void> _login() async {
-    if (_codeController.text.length != 6) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请输入6位验证码')),
-      );
-      return;
-    }
-    setState(() => _loading = true);
-    try {
-      final result = await _client.mobileLogin(
-        _phoneController.text,
-        _codeController.text,
-      );
-      // 保存 token 到本地
-      await WenshuAuth.instance.saveLogin(token: result.token);
-      // 获取用户信息
-      try {
-        final userInfo = await _client.userInfo();
-        await WenshuAuth.instance.saveLogin(
-          token: result.token,
-          userName: userInfo.name,
-          uid: userInfo.uid,
-        );
-      } catch (_) {}
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('登录成功，欢迎 ${WenshuAuth.instance.userName ?? ""}')),
-        );
-        Navigator.of(context).pop(true);
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('登录失败：$e')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
+  bool _checking = false;
+  bool _done = false;
+  double _progress = 0;
+  String? _error;
 
   @override
   Widget build(BuildContext context) {
-    final l10n = context.l10n;
     return Scaffold(
-      appBar: AppBar(title: const Text('登录文叔叔')),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(24),
-          children: [
-            const SizedBox(height: 32),
-            const Center(
-              child: Icon(Icons.cloud_outlined, size: 64),
-            ),
-            const SizedBox(height: 16),
-            Center(
-              child: Text(
-                '文叔叔账号登录',
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
-            ),
-            const SizedBox(height: 32),
-            TextField(
-              controller: _phoneController,
-              keyboardType: TextInputType.phone,
-              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              maxLength: 11,
-              decoration: const InputDecoration(
-                labelText: '手机号',
-                hintText: '请输入手机号',
-                prefixText: '+86 ',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _codeController,
-                    keyboardType: TextInputType.number,
-                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                    maxLength: 6,
-                    decoration: const InputDecoration(
-                      labelText: '验证码',
-                      hintText: '请输入验证码',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                SizedBox(
-                  width: 100,
-                  child: OutlinedButton(
-                    onPressed: _countdown > 0 ? null : _sendCode,
-                    child: Text(_countdown > 0 ? '$_countdown秒' : '获取验证码'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 24),
-            FilledButton(
-              onPressed: _loading ? null : _login,
-              child: _loading
-                  ? const CircularProgressIndicator()
-                  : const Text('登录'),
-            ),
-          ],
+      appBar: AppBar(
+        title: const Text('文叔叔登录'),
+        leading: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: () => Navigator.of(context).pop(),
         ),
       ),
+      body: Stack(
+        children: [
+          InAppWebView(
+            initialUrlRequest: URLRequest(url: WebUri(_loginUrl)),
+            initialSettings: InAppWebViewSettings(
+              javaScriptEnabled: true,
+              domStorageEnabled: true,
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            ),
+            onProgressChanged: (controller, progress) {
+              setState(() => _progress = progress / 100);
+            },
+            onLoadStop: (controller, url) async {
+              // 页面加载完成后，检查是否登录成功
+              if (_done) return;
+              await _tryCapture(controller);
+            },
+          ),
+          if (_progress < 1.0)
+            LinearProgressIndicator(value: _progress),
+          if (_checking)
+            const Center(child: CircularProgressIndicator()),
+          if (_error != null)
+            Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(_error!),
+                  const SizedBox(height: 16),
+                  ElevatedButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('关闭'),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
     );
+  }
+
+  Future<void> _tryCapture(InAppWebViewController controller) async {
+    if (_checking || _done) return;
+    setState(() {
+      _checking = true;
+      _error = null;
+    });
+    try {
+      // 从 Cookie 里获取 token
+      final cookies = await CookieManager().getCookies(url: WebUri('https://www.wenshushu.cn'));
+      String? token;
+      for (final cookie in cookies) {
+        if (cookie.name == 'token' || cookie.name == 'X-TOKEN') {
+          token = cookie.value;
+          break;
+        }
+      }
+      // 也从 localStorage 里获取
+      if (token == null) {
+        final result = await controller.evaluateJavascript(source: '''
+          localStorage.getItem('token') || localStorage.getItem('X-TOKEN');
+        ''');
+        if (result != null && result.toString().isNotEmpty) {
+          token = result.toString().replaceAll('"', '');
+        }
+      }
+      if (token != null && token.isNotEmpty) {
+        // 保存 token
+        await WenshuAuth.instance.init(token);
+        setState(() => _done = true);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('登录成功')),
+          );
+          Navigator.of(context).pop(true);
+        }
+      } else {
+        setState(() => _checking = false);
+      }
+    } catch (e) {
+      setState(() {
+        _error = '登录失败：$e';
+        _checking = false;
+      });
+    }
   }
 }

@@ -2,6 +2,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import '../core/api/wenshu_auth.dart';
+import '../core/api/wenshu_client.dart';
 import 'wenshu_login_page.dart';
 import 'wenshu_upload_page.dart';
 import 'wenshu_receive_page.dart';

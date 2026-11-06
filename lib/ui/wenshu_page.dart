@@ -30,11 +30,10 @@ class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
   }
 
   Future<void> _checkLogin() async {
-    final token = await WenshuAuth.getToken();
-    final userName = await WenshuAuth.getUserName();
+    await WenshuAuth.instance.init();
     setState(() {
-      _isLoggedIn = token != null && token.isNotEmpty;
-      _userName = userName ?? '';
+      _isLoggedIn = WenshuAuth.instance.isLoggedIn;
+      _userName = WenshuAuth.instance.userName ?? '';
     });
   }
 
@@ -72,7 +71,7 @@ class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
         MaterialPageRoute(builder: (_) => const WenshuLoginPage()),
       );
     } else if (result == 'logout' && mounted) {
-      await WenshuAuth.clear();
+      await WenshuAuth.instance.logout();
       await _checkLogin();
     }
   }

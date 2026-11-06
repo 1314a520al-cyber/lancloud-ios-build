@@ -33,19 +33,10 @@ class _WenshuUploadPageState extends riverpod.ConsumerState<WenshuUploadPage> {
   }
 
   Future<void> _pickFile() async {
-    final result = await Future.value(null)(
-      type: FileType.any,
-      allowMultiple: true,
+    // TODO: iOS 上传功能暂时占位
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('上传功能开发中')),
     );
-    if (result != null) {
-      setState(() {
-        _files.addAll(result.files.map((f) => _FileItem(
-              name: f.name,
-              size: f.size ?? 0,
-              path: f.path,
-            )));
-      });
-    }
   }
 
   Future<void> _upload() async {

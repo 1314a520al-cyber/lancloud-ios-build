@@ -22,18 +22,16 @@ jobs:
           CODE_SIGNING_REQUIRED: NO
           CODE_SIGNING_IDENTITY: ""
           EXPANDED_CODE_SIGN_IDENTITY: ""
-        run: flutter build ios --release --no-codesign --build-name=1.0.9 --build-number=9
+        run: flutter build ipa --no-codesign --build-name=1.1.0 --build-number=10
       - name: Package IPA
         if: always()
         run: |
-          ls -lh build/ios/iphoneos/
-          mkdir -p Payload
-          cp -r build/ios/iphoneos/Runner.app Payload/
-          zip -qry LanCloud-unsigned.ipa Payload
-          ls -lh LanCloud-unsigned.ipa
+          ls -lh build/ios/ipa/
+          cp build/ios/ipa/*.ipa LanCloud.ipa
+          ls -lh LanCloud.ipa
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: lancloud-ios-ipa
-          path: LanCloud-unsigned.ipa
+          path: LanCloud.ipa
           retention-days: 30

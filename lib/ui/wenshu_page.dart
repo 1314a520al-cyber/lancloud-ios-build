@@ -53,8 +53,8 @@ class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
         setState(() {
           _userName = info.name;
           _uid = info.uid;
-          _totalSpace = 10 * 1024 * 1024 * 1024; // 10GB 固定值
-          _usedSpace = 0;
+          _totalSpace = info.totalSpace;
+          _usedSpace = info.usedSpace;
         });
       }
     } catch (_) {}

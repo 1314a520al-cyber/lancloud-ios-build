@@ -282,6 +282,8 @@ class WenshuUserInfo {
     required this.bid,
     required this.tel,
     required this.vip,
+    this.totalSpace = 20 * 1024 * 1024 * 1024, // 默认20GB
+    this.usedSpace = 0,
   });
   factory WenshuUserInfo.fromJson(Map<String, dynamic> json) => WenshuUserInfo(
         uid: json['uid'] as String? ?? '',
@@ -289,12 +291,16 @@ class WenshuUserInfo {
         bid: json['bid'] as String? ?? '',
         tel: json['tel'] as String? ?? '',
         vip: json['vip'] as String? ?? '',
+        totalSpace: int.tryParse(json['totalSpace']?.toString() ?? '') ?? (20 * 1024 * 1024 * 1024),
+        usedSpace: int.tryParse(json['userSpace']?.toString() ?? '') ?? 0,
       );
   final String uid;
   final String name;
   final String bid;
   final String tel;
   final String vip;
+  final int totalSpace;
+  final int usedSpace;
 }
 
 class WenshuTask {

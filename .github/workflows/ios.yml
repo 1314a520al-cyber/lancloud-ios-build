@@ -22,7 +22,7 @@ jobs:
           CODE_SIGNING_REQUIRED: NO
           CODE_SIGNING_IDENTITY: ""
           EXPANDED_CODE_SIGN_IDENTITY: ""
-        run: flutter build ios --release --no-codesign --build-name=1.0.4 --build-number=4
+        run: flutter build ios --release --no-codesign --build-name=1.0.5 --build-number=5
       - name: Package IPA
         if: always()
         run: |

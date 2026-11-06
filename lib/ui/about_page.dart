@@ -132,12 +132,6 @@ class AboutContent extends StatelessWidget {
               trailing: const Icon(Icons.open_in_new),
               onTap: () => openExternalUrl(Uri.parse(projectUrl)),
             ),
-            ListTile(
-              leading: const Icon(Icons.folder),
-              title: const Text('iOS 仓库'),
-              trailing: const Icon(Icons.open_in_new),
-              onTap: () => openExternalUrl(Uri.parse(myRepoUrl)),
-            ),
           ],
         ),
         const SizedBox(height: 8),

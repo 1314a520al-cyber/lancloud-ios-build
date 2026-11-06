@@ -1,18 +1,19 @@
 # LanCloud iOS
 
-LanCloud 蓝奏云第三方客户端 iOS 版。
+蓝奏云第三方客户端 iOS 版（自签名）。
 
 ## 项目介绍
 
-这是一个蓝奏云第三方 Flutter 客户端，支持 iOS 平台。
+这是 LanCloud 蓝奏云第三方 Flutter 客户端的 iOS 移植版，专为 iPhone 自签安装优化。
 
 ### 功能
-- **MD 3 设计**：表现力设计、动态取色、自适应布局、悬浮底栏
+- **MD 3 设计**：表现力设计、动态取色、自适应布局
 - **网盘管理**：上传、下载、分享、新建文件夹、修改信息、移动、删除、搜索、排序
 - **分享链接**：支持打开蓝奏云分享链接
 - **多账号**：多账号支持
 - **回收站**：蓝奏云回收站原生页面（列表、恢复、彻底删除、清空）
 - **文叔叔**：文叔叔（wenshushu.cn）原生功能（登录、上传、取件下载）
+- **固定目录**：常用网盘目录固定到首页快速访问
 
 ### 技术栈
 - Flutter 3.47+
@@ -20,154 +21,71 @@ LanCloud 蓝奏云第三方客户端 iOS 版。
 - material_ui（MD3 设计）
 - dio（网络请求）
 - shared_preferences（本地存储）
-- flutter_secure_storage（安全存储）
 - file_picker（文件选择）
 - receive_sharing_intent（接收分享）
 
-### 接口来源
-- **蓝奏云**：https://pc.woozooo.com
-- **文叔叔**：https://ap.wenshushu.cn
+## 接口来源
 
-### 插件来源
-- Flutter：https://flutter.dev
-- material_ui：https://pub.dev/packages/material_ui
-- dio：https://pub.dev/packages/dio
-- shared_preferences：https://pub.dev/packages/shared_preferences
-- file_picker：https://pub.dev/packages/file_picker
-- receive_sharing_intent：https://pub.dev/packages/receive_sharing_intent
+| 服务 | 地址 | 说明 |
+| --- | --- | --- |
+| 蓝奏云 | https://pc.woozooo.com | 网盘接口、回收站接口 |
+| 文叔叔 | https://ap.wenshushu.cn | 文叔叔传输接口 |
 
-### 参与的仓库
-- 原项目：LanCloud（已设为私密）
-- 构建仓库：LanCloud-iOS（本仓库）
+## 插件来源
+
+| 插件 | 地址 | 说明 |
+| --- | --- | --- |
+| Flutter | https://flutter.dev | 跨平台框架 |
+| material_ui | https://pub.dev/packages/material_ui | MD3 设计组件 |
+| dio | https://pub.dev/packages/dio | 网络请求库 |
+| shared_preferences | https://pub.dev/packages/shared_preferences | 本地键值存储 |
+| file_picker | https://pub.dev/packages/file_picker | 文件选择器 |
+| receive_sharing_intent | https://pub.dev/packages/receive_sharing_intent | 接收系统分享 |
+
+## 参与的仓库
+
+| 仓库 | 说明 |
+| --- | --- |
+| **lancloud-ios-build**（本仓库） | iOS 构建 + 发行仓库 |
+| LanCloud-iOS | 旧构建仓库（已设为私密） |
+| LanZouCloud-API | 蓝奏云接口协议参考 |
+| lanzouyun-disk | 蓝奏云接口协议参考 |
+| lanzouplus | 蓝奏云接口协议参考 |
 
 ## 下载
 
-最新版本：[v1.0.1](https://github.com/1314a520al-cyber/LanCloud-iOS/releases/tag/v1.0.1)
+最新版本：[v1.0.3](https://github.com/1314a520al-cyber/lancloud-ios-build/releases/tag/v1.0.3)
 
-下载 `LanCloud-v1.0.1.ipa`，用 AltStore / Sideloadly 等工具自签安装。
+下载 `LanCloud-v1.0.3.ipa`，用 AltStore / Sideloadly / TrollStore 等工具自签安装。
+
+> 注意：本应用未经过苹果 App Store 签名，需要自行签名后才能安装。
 
 ## 更新日志
 
-### v1.0.1
-- **新增** 文叔叔原生功能：登录（手机号+验证码）、上传、取件下载
-- **新增** 蓝奏云回收站原生页面：列表、恢复、彻底删除、清空
-- **新增** 文叔叔右上角圆形头像，点击弹出账号菜单
-- **修复** 模拟器构建 IPA 在真机上闪退的问题
-- **修复** material_ui 包图标不存在的编译错误
-- **修复** shared_preferences_foundation 与 Xcode 16 不兼容的问题
-- **修复** receive_sharing_intent 与 Xcode 16 不兼容的问题
+### v1.0.3
+- **重要** 改成真机模式构建，IPA 可在真机自签安装
+- **重要** 安装包大小从 95MB 缩小到 13MB
+- **修复** 回收站删除文件后不显示
+- **修复** 网盘页面切换后报错乱码
+- **修复** 编辑资料时输入框被键盘遮住
+- **修复** 多个编译错误（图标不存在、FilePicker 等）
+- **新增** 文叔叔页面（登录、上传、取件、头像菜单）
+- **新增** 蓝奏云回收站原生页面
+- **新增** 固定网盘目录操作入口
+- **优化** 我的页面 UI 美化
+- **优化** 设置页面改成可折叠卡片
+- **优化** 关于页面调整（去掉"应用"标题）
+- **优化** 底栏改成两个悬浮
+
+### v1.0.2
+- 模拟器 debug 模式构建（不能在真机上正常运行）
 
 ### v1.0.0
-- 第一个构建版本（模拟器模式，不能在真机上运行）
+- 第一个构建版本
 
 ## 反馈邮箱
 sxewku6006@163.com
 
----
-
-# LanCloud（蓝云）
-
-蓝奏云第三方 Flutter 客户端，使用 DeepSeek + Codex 辅助开发与验证。
-
-<div align="center">
-<img src="assets/images/screenshots/screenshot_1.png" width="47%" alt="home_fold" />&nbsp;
-<img src="assets/images/screenshots/screenshot_2.png" width="47%" alt="settings_fold_two_pane" />
-<br/>
-<img src="assets/images/screenshots/screenshot_3.png" width="22.5%" alt="home" />&nbsp;
-<img src="assets/images/screenshots/screenshot_4.png" width="22.5%" alt="drive" />&nbsp;
-<img src="assets/images/screenshots/screenshot_5.png" width="22.5%" alt="transfers" />&nbsp;
-<img src="assets/images/screenshots/screenshot_6.png" width="22.5%" alt="update" />
-</div>
-
-## 功能
-
-- **MD 3 设计**：表现力设计、动态取色、自适应布局、悬浮底栏
-- **网盘管理**：上传、下载、分享、新建文件夹、修改信息、移动、删除、搜索、排序
-- **分享链接**：支持打开蓝奏云分享链接
-- **多账号**：多账号支持
-- **便利功能**：收藏 / 快速访问 / 最近使用
-- **无障碍**：应用已尝试进行无障碍功能优化，敬请反馈以帮助改进
-- **传输中心**：上传、下载任务管理，支持多任务
-- **备份与恢复**：本地备份 + WebDAV 自动备份
-- **Android 集成**：可接收其他应用分享的链接 / 文件；适配 Android 12 启动屏与预测性返回手势
-- **Windows 集成**：可把文件拖进窗口上传；系统通知框架
-
-## 平台
-
-- [x] **iOS** `15+`（本仓库维护分支，iOS 双方案）
-- [x] **Android** `7+`
-- [x] **Windows** `10 1809 17763+`
-- [ ] HarmonyOS NEXT `早期技术验证阶段`
-- [ ] 其余平台无计划
-
-> HarmonyOS NEXT 未来数月将维持早期技术验证阶段。因目前 Flutter OpenHarmony 适配的[主要社区](https://atomgit.com/CPF-Flutter/flutter_flutter)暂未适配 Flutter 3.47，而社区分支版本经测试性能表现欠佳，且无法对齐部分关键功能。
-
-## 获取
-
-可以从 [Releases](https://github.com/1314a520al-cyber/LanCloud/releases) 下载，或克隆仓库后自行编译。
-
-- **Android**：优先选择 `arm64-v8a`；旧设备选 `armeabi-v7a`；模拟器选 `x86_64`。
-- **Windows**：目前提供便携版 `x64_portable`，需下载解压后使用；运行需要 [WebView2 运行时](https://developer.microsoft.com/zh-cn/microsoft-edge/webview2/)，如缺乏，则无法打开网页登录 / 分享浏览等内嵌网页。
-
-## 构建
-
-### 版本号规范
-
-细节见 [docs/VERSIONING.md](docs/VERSIONING.md)。
-
-### Android
-
-```powershell
-flutter pub get
-flutter build apk --release --split-per-abi
-```
-
-本仓库的 Android 签名公钥如下，可验证是否为本仓库产物：
-
-```
-70:BD:4A:A8:53:22:FE:26:E6:72:02:FA:C3:17:29:BD:E1:F8:54:FA:1B:D2:FD:52:C8:8F:FC:AA:02:ED:B5:BB
-```
-
-### Windows
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/build_windows.ps1
-```
-
-### 发布
-
-细节见 [docs/CI_RELEASE.md](docs/CI_RELEASE.md)。
-
-## 开源与致谢
-
-本项目使用 DeepSeek + Codex 辅助开发与验证。
-
-<div>
-<img src="assets/images/deepseek_generated_by_ai.jpg" width=100></img>
-<br><br>
-</div>
-
-本项目以 Apache License 2.0 开源。
-
-此项目的接口协议研究参考了以下开源实现：
-
-- [LanZouCloud-API](https://github.com/zaxtyson/LanZouCloud-API)（MIT）
-- [lanzouyun-disk](https://github.com/chenhb23/lanzouyun-disk)（MIT）
-- [lanzouplus](https://github.com/nekobyran/lanzouplus)（MIT）
-
-细节见 [docs/PROTOCOL.md](docs/PROTOCOL.md)。
-
 ## 免责声明
 
-> 本应用是非官方的第三方客户端，与蓝奏云官方无任何关联，也未获得官方授权。应用按「现状」提供，不提供任何担保；因使用本应用造成的账号受限、数据丢失、上传或下载失败等风险，由使用者自行承担。请勿将其用于商业用途或大规模分发。
-
-## 开发环境
-
-| 组件 | 信息 |
-| --- | --- |
-| Flutter | 3.47.9 |
-| JDK | 17 |
-| Android SDK | platform 37、build-tools、NDK 28.2、CMake |
-| Visual Studio Build Tools | 2026（Windows SDK 10.0.28000）；勾选「使用 C++ 的桌面开发」工作负载（含 Windows SDK 与 CMake），与「C++ ATL for x64/x86 (最新 MSVC)」 |
-| Windows 开发者模式 | Flutter 构建插件创建符号链接所需 |
-| NuGet CLI | 拉取 WebView2 SDK 所需 |
+> 本应用是非官方的第三方客户端，与蓝奏云、文叔叔官方无任何关联，也未获得官方授权。应用按「现状」提供，不提供任何担保；因使用本应用造成的账号受限、数据丢失、上传或下载失败等风险，由使用者自行承担。

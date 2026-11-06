@@ -22,6 +22,9 @@ class WenshuPage extends riverpod.ConsumerStatefulWidget {
 class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
   bool _isLoggedIn = false;
   String _userName = '';
+  String _uid = '';
+  int _totalSpace = 0;
+  int _usedSpace = 0;
 
   @override
   void initState() {
@@ -34,7 +37,26 @@ class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
     setState(() {
       _isLoggedIn = WenshuAuth.instance.isLoggedIn;
       _userName = WenshuAuth.instance.userName ?? '';
+      _uid = WenshuAuth.instance.uid ?? '';
     });
+    if (_isLoggedIn) {
+      _loadUserInfo();
+    }
+  }
+
+  Future<void> _loadUserInfo() async {
+    try {
+      final client = WenshuClient(token: WenshuAuth.instance.token);
+      final info = await client.userInfo();
+      if (mounted) {
+        setState(() {
+          _userName = info.name;
+          _uid = info.uid;
+          _totalSpace = info.totalSpace;
+          _usedSpace = info.usedSpace;
+        });
+      }
+    } catch (_) {}
   }
 
   Future<void> _showAccountMenu() async {
@@ -114,13 +136,75 @@ class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
                 color: theme.colorScheme.onSurfaceVariant,
               ),
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
+            // 用户信息卡片
+            if (_isLoggedIn) ...[
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          CircleAvatar(
+                            backgroundColor: theme.colorScheme.primary,
+                            child: Text(
+                              _userName.isNotEmpty ? _userName.substring(0, 1) : '?',
+                              style: TextStyle(
+                                color: theme.colorScheme.onPrimary,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  _userName,
+                                  style: theme.textTheme.titleMedium,
+                                ),
+                                Text(
+                                  'UID: $_uid',
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      // 存储空间
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('存储空间'),
+                          Text(
+                            '${(_usedSpace / 1024 / 1024 / 1024).toStringAsFixed(1)}GB / ${(_totalSpace / 1024 / 1024 / 1024).toStringAsFixed(1)}GB',
+                            style: theme.textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      LinearProgressIndicator(
+                        value: _totalSpace > 0 ? _usedSpace / _totalSpace : 0,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
             // 上传卡片
             Card(
               child: ListTile(
-                leading: const Icon(Icons.cloud_upload, size: 32),
-                title: const Text('上传文件'),
-                subtitle: const Text('从其他软件选择文件上传'),
+                leading: const Icon(Icons.send, size: 32),
+                title: const Text('发文件'),
+                subtitle: const Text('上传文件生成分享链接'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () {
                   Navigator.of(context).push(
@@ -133,13 +217,75 @@ class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
             // 取件卡片
             Card(
               child: ListTile(
-                leading: const Icon(Icons.cloud_download, size: 32),
-                title: const Text('取件下载'),
-                subtitle: const Text('输入取件码下载文件'),
+                leading: const Icon(Icons.download, size: 32),
+                title: const Text('收集文件'),
+                subtitle: const Text('创建收集链接让别人上传'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(builder: (_) => const WenshuReceivePage()),
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('收集文件功能开发中')),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Divider(),
+            const SizedBox(height: 12),
+            // 我发送的
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.send_outlined, size: 32),
+                title: const Text('我发送的'),
+                subtitle: const Text('查看我上传的文件'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('功能开发中')),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
+            // 发给我的
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.call_received, size: 32),
+                title: const Text('发给我的'),
+                subtitle: const Text('查看别人发给我的文件'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('功能开发中')),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
+            // 我收集的
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.folder, size: 32),
+                title: const Text('我收集的'),
+                subtitle: const Text('查看我收集的文件'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('功能开发中')),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
+            // 向我收集的
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.folder_shared, size: 32),
+                title: const Text('向我收集的'),
+                subtitle: const Text('查看别人向我收集的文件'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('功能开发中')),
                   );
                 },
               ),

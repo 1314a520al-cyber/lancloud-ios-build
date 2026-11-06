@@ -19,7 +19,10 @@ jobs:
       - name: Build iOS
         env:
           CODE_SIGNING_ALLOWED: NO
-        run: flutter build ios --release --no-codesign
+          CODE_SIGNING_REQUIRED: NO
+          CODE_SIGNING_IDENTITY: ""
+          EXPANDED_CODE_SIGN_IDENTITY: ""
+        run: flutter build ios --release --no-codesign --build-name=1.0.2 --build-number=2
       - name: Package IPA
         if: always()
         run: |

@@ -6,6 +6,7 @@ import '../core/api/wenshu_client.dart';
 import 'wenshu_login_page.dart';
 import 'wenshu_upload_page.dart';
 import 'wenshu_receive_page.dart';
+import 'wenshu_task_list_page.dart';
 import '../l10n/l10n.dart';
 import 'common.dart';
 import 'm3e.dart';
@@ -223,8 +224,8 @@ class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
                 subtitle: const Text('创建收集链接让别人上传'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('收集文件功能开发中')),
+                  Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const WenshuTaskListPage(title: '收集文件', type: 'collect')),
                   );
                 },
               ),
@@ -240,8 +241,8 @@ class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
                 subtitle: const Text('查看我上传的文件'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('功能开发中')),
+                  Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const WenshuTaskListPage(title: '我发送的', type: 'send')),
                   );
                 },
               ),
@@ -255,8 +256,8 @@ class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
                 subtitle: const Text('查看别人发给我的文件'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('功能开发中')),
+                  Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const WenshuTaskListPage(title: '发给我的', type: 'receive')),
                   );
                 },
               ),
@@ -270,8 +271,8 @@ class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
                 subtitle: const Text('查看我收集的文件'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('功能开发中')),
+                  Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const WenshuTaskListPage(title: '我收集的', type: 'collect')),
                   );
                 },
               ),
@@ -285,8 +286,8 @@ class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
                 subtitle: const Text('查看别人向我收集的文件'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('功能开发中')),
+                  Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const WenshuTaskListPage(title: '向我收集的', type: 'recollect')),
                   );
                 },
               ),

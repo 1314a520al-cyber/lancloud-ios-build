@@ -259,6 +259,66 @@ class WenshuClient {
       throw WenshuException(data['message'] ?? '设置失败');
     }
   }
+
+  /// 获取我发送的文件列表
+  Future<List<WenshuTask>> getSendList({int page = 1, int size = 20}) async {
+    final resp = await _dio.get(
+      '/ag/task/sendlist',
+      queryParameters: {'page': page, 'size': size},
+      options: Options(headers: _headers),
+    );
+    final data = resp.data as Map<String, dynamic>;
+    if (data['code'] != 0) {
+      throw WenshuException(data['message'] ?? '获取列表失败');
+    }
+    final list = data['data']?['list'] as List? ?? [];
+    return list.map((e) => WenshuTask.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  /// 获取发给我的文件列表
+  Future<List<WenshuTask>> getReceiveList({int page = 1, int size = 20}) async {
+    final resp = await _dio.get(
+      '/ag/task/recelist',
+      queryParameters: {'page': page, 'size': size},
+      options: Options(headers: _headers),
+    );
+    final data = resp.data as Map<String, dynamic>;
+    if (data['code'] != 0) {
+      throw WenshuException(data['message'] ?? '获取列表失败');
+    }
+    final list = data['data']?['list'] as List? ?? [];
+    return list.map((e) => WenshuTask.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  /// 获取我收集的文件列表
+  Future<List<WenshuTask>> getCollectList({int page = 1, int size = 20}) async {
+    final resp = await _dio.get(
+      '/ag/task/collectlist',
+      queryParameters: {'page': page, 'size': size},
+      options: Options(headers: _headers),
+    );
+    final data = resp.data as Map<String, dynamic>;
+    if (data['code'] != 0) {
+      throw WenshuException(data['message'] ?? '获取列表失败');
+    }
+    final list = data['data']?['list'] as List? ?? [];
+    return list.map((e) => WenshuTask.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  /// 获取向我收集的文件列表
+  Future<List<WenshuTask>> getRecollectList({int page = 1, int size = 20}) async {
+    final resp = await _dio.get(
+      '/ag/task/recacollectlist',
+      queryParameters: {'page': page, 'size': size},
+      options: Options(headers: _headers),
+    );
+    final data = resp.data as Map<String, dynamic>;
+    if (data['code'] != 0) {
+      throw WenshuException(data['message'] ?? '获取列表失败');
+    }
+    final list = data['data']?['list'] as List? ?? [];
+    return list.map((e) => WenshuTask.fromJson(e as Map<String, dynamic>)).toList();
+  }
 }
 
 class WenshuException implements Exception {

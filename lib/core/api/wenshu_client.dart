@@ -7,7 +7,7 @@ class WenshuClient {
   WenshuClient({this.token, Dio? dio})
       : _dio = dio ??
             Dio(BaseOptions(
-              baseUrl: 'https://ap.wenshushu.cn',
+              baseUrl: 'https://www.wenshushu.cn',
               connectTimeout: const Duration(seconds: 15),
               receiveTimeout: const Duration(seconds: 30),
             ));

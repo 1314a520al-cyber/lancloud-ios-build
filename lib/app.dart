@@ -53,7 +53,6 @@ import 'ui/transfers_page.dart';
 import 'ui/transfer_running_count.dart';
 import 'ui/app_icons.dart';
 import 'ui/update_prompt.dart';
-import 'ui/wenshu_page.dart';
 
 /// SnackBar 在大屏上的最大宽度。小屏不设置固定宽度，继续使用浮动 SnackBar
 /// 的默认左右安全边距；否则固定宽度会被屏幕约束压到贴边。

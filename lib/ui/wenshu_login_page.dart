@@ -85,58 +85,37 @@ class _WenshuLoginPageState extends ConsumerState<WenshuLoginPage> {
     try {
       String? token;
       
-      // 1. 从所有 Cookie 里找 token
+      // 1. 从所有 Cookie 里找 token（和蓝奏云一样，从 Cookie 抓取）
       final cookies = await CookieManager().getCookies(url: WebUri('https://www.wenshushu.cn'));
+      // 先打印所有 Cookie 方便调试
+      final cookieMap = <String, String>{};
       for (final cookie in cookies) {
+        cookieMap[cookie.name] = cookie.value;
         final name = cookie.name.toLowerCase();
-        if (name == 'token' || name == 'x-token' || name == 'wenshu_token' || name == 'authorization') {
+        // 找任何像 token 的 Cookie
+        if (name == 'token' || name == 'x-token' || name == 'wenshu_token' || 
+            name == 'authorization' || name == 'session' || name == 'sessionid' ||
+            name.contains('token') || name.contains('auth')) {
           token = cookie.value;
-          break;
         }
       }
       
-      // 2. 从 localStorage 里找
+      // 2. 如果 Cookie 里没找到，从 localStorage 里找
       if (token == null) {
         final result = await controller.evaluateJavascript(source: '''
           (function() {
-            var keys = ['token', 'x-token', 'X-TOKEN', 'wenshu_token', 'Authorization', 'authorization'];
-            for (var i = 0; i < keys.length; i++) {
-              var v = localStorage.getItem(keys[i]);
-              if (v) return v;
-            }
-            return null;
-          })()
-        ''');
-        if (result != null && result.toString().isNotEmpty && result.toString() != 'null') {
-          token = result.toString().replaceAll('"', '').replaceAll("'", '');
-        }
-      }
-      
-      // 3. 从 sessionStorage 里找
-      if (token == null) {
-        final result = await controller.evaluateJavascript(source: '''
-          (function() {
-            var keys = ['token', 'x-token', 'X-TOKEN', 'wenshu_token', 'Authorization', 'authorization'];
-            for (var i = 0; i < keys.length; i++) {
-              var v = sessionStorage.getItem(keys[i]);
-              if (v) return v;
-            }
-            return null;
-          })()
-        ''');
-        if (result != null && result.toString().isNotEmpty && result.toString() != 'null') {
-          token = result.toString().replaceAll('"', '').replaceAll("'", '');
-        }
-      }
-      
-      // 4. 从所有 localStorage 键值对里找
-      if (token == null) {
-        final result = await controller.evaluateJavascript(source: '''
-          (function() {
+            // 先打印所有 localStorage 键值
+            var all = {};
             for (var i = 0; i < localStorage.length; i++) {
               var key = localStorage.key(i);
-              if (key && key.toLowerCase().indexOf('token') >= 0) {
-                return localStorage.getItem(key);
+              all[key] = localStorage.getItem(key);
+            }
+            // 找任何像 token 的
+            for (var key in all) {
+              if (key.toLowerCase().indexOf('token') >= 0 || 
+                  key.toLowerCase().indexOf('auth') >= 0 ||
+                  key.toLowerCase().indexOf('session') >= 0) {
+                return all[key];
               }
             }
             return null;

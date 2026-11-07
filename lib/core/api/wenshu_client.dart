@@ -319,6 +319,35 @@ class WenshuClient {
     final list = data['data']?['list'] as List? ?? [];
     return list.map((e) => WenshuTask.fromJson(e as Map<String, dynamic>)).toList();
   }
+
+  /// 查询取件码信息
+  Future<WenshuShareInfo> shareInfo({required String sharekey, String pwd = ''}) async {
+    final resp = await _dio.get(
+      '/ag/share/info',
+      queryParameters: {'sharekey': sharekey, 'pwd': pwd},
+      options: Options(headers: _headers),
+    );
+    final data = resp.data as Map<String, dynamic>;
+    if (data['code'] != 0) {
+      throw WenshuException(data['message'] ?? '查询取件码失败');
+    }
+    return WenshuShareInfo.fromJson(data['data'] as Map<String, dynamic>);
+  }
+
+  /// 获取取件码对应的文件列表
+  Future<List<WenshuFile>> shareFileList({required String sharekey, String pwd = ''}) async {
+    final resp = await _dio.get(
+      '/ag/share/filelist',
+      queryParameters: {'sharekey': sharekey, 'pwd': pwd},
+      options: Options(headers: _headers),
+    );
+    final data = resp.data as Map<String, dynamic>;
+    if (data['code'] != 0) {
+      throw WenshuException(data['message'] ?? '获取文件列表失败');
+    }
+    final list = data['data']?['list'] as List? ?? [];
+    return list.map((e) => WenshuFile.fromJson(e as Map<String, dynamic>)).toList();
+  }
 }
 
 class WenshuException implements Exception {
@@ -412,4 +441,29 @@ class WenshuShareLinks {
   final String socialUrl;
   final String publicUrl;
   final String mgrUrl;
+}
+
+class WenshuShareInfo {
+  WenshuShareInfo({
+    required this.sharekey,
+    required this.title,
+    required this.expire,
+    required this.pwd,
+    required this.fileCount,
+    required this.fileSize,
+  });
+  factory WenshuShareInfo.fromJson(Map<String, dynamic> json) => WenshuShareInfo(
+        sharekey: json['sharekey']?.toString() ?? '',
+        title: json['title']?.toString() ?? '',
+        expire: json['expire']?.toString() ?? '',
+        pwd: json['pwd']?.toString() ?? '',
+        fileCount: int.tryParse(json['file_count']?.toString() ?? '') ?? 0,
+        fileSize: int.tryParse(json['file_size']?.toString() ?? '') ?? 0,
+      );
+  final String sharekey;
+  final String title;
+  final String expire;
+  final String pwd;
+  final int fileCount;
+  final int fileSize;
 }

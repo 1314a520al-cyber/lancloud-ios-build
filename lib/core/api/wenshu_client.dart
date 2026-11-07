@@ -26,7 +26,7 @@ class WenshuClient {
   /// 匿名登录，获取临时 token。
   Future<WenshuLoginResult> anonymousLogin() async {
     final resp = await _dio.post(
-      '/ap/login/anonymous',
+      '/ag/login/anonymous',
       data: {},
       options: Options(headers: _headers),
     );
@@ -40,7 +40,7 @@ class WenshuClient {
   /// 获取账号信息。
   Future<WenshuUserInfo> userInfo() async {
     final resp = await _dio.post(
-      '/ap/user/userinfo',
+      '/ag/user/userinfo',
       data: {},
       options: Options(headers: _headers),
     );
@@ -54,7 +54,7 @@ class WenshuClient {
   /// 发送短信验证码。
   Future<void> sendCode(String phone) async {
     final resp = await _dio.post(
-      '/ap/login/sendcode',
+      '/ag/login/sendcode',
       data: {
         'coutry_code': '+86',
         'tel': phone,
@@ -70,7 +70,7 @@ class WenshuClient {
   /// 验证码登录。
   Future<WenshuLoginResult> mobileLogin(String phone, String code) async {
     final resp = await _dio.post(
-      '/ap/login/mobilecode',
+      '/ag/login/mobilecode',
       data: {
         'coutry_code': '+86',
         'tel': phone,
@@ -93,7 +93,7 @@ class WenshuClient {
     String pwd = '',
   }) async {
     final resp = await _dio.post(
-      '/ap/task/addsend',
+      '/ag/task/addsend',
       data: {
         'sender': '',
         'remark': '',
@@ -129,7 +129,7 @@ class WenshuClient {
     required int count,
   }) async {
     final resp = await _dio.post(
-      '/ap/uploadv2/getupid',
+      '/ag/uploadv2/getupid',
       data: {
         'preid': preid,
         'boxid': boxid,
@@ -155,7 +155,7 @@ class WenshuClient {
     required String upId,
   }) async {
     final resp = await _dio.post(
-      '/ap/uploadv2/psurl',
+      '/ag/uploadv2/psurl',
       data: {
         'ispart': false,
         'fname': fname,
@@ -179,7 +179,7 @@ class WenshuClient {
     required String upId,
   }) async {
     final resp = await _dio.post(
-      '/ap/uploadv2/complete',
+      '/ag/uploadv2/complete',
       data: {
         'ispart': false,
         'fname': fname,
@@ -205,7 +205,7 @@ class WenshuClient {
     required String ufileid,
   }) async {
     final resp = await _dio.post(
-      '/ap/task/copysend',
+      '/ag/task/copysend',
       data: {
         'tid': tid,
         'bid': bid,
@@ -226,7 +226,7 @@ class WenshuClient {
     int type = 1,
   }) async {
     final resp = await _dio.post(
-      '/ap/dl/sign',
+      '/ag/dl/sign',
       data: {
         'ufileid': ufileid,
         'type': type,
@@ -247,7 +247,7 @@ class WenshuClient {
     required String value,
   }) async {
     final resp = await _dio.post(
-      '/ap/task/taskset',
+      '/ag/task/taskset',
       data: {
         'taskid': taskid,
         'name': name,

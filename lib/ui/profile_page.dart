@@ -170,53 +170,16 @@ class _ProfilePageState extends riverpod.ConsumerState<ProfilePage>
     );
   }
 
-  /// 点击回收站：弹出选择原生/网页版
+  /// 点击回收站：直接打开网页版
   void _showRecycleBinChoice(BuildContext context) {
-    showAppSheet<void>(
-      context,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: Text(
-              '选择回收站',
-              style: context.m3eEmphasizedTheme.titleLarge,
-            ),
-          ),
-          SheetListGroup(
-            children: [
-              M3ePickTile.action(
-                label: '原生',
-                leading: const Icon(Icons.close),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  Navigator.of(context).push(
-                    MaterialPageRoute(builder: (_) => const RecycleBinPage()),
-                  );
-                },
-              ),
-              M3ePickTile.action(
-                label: '网页',
-                leading: const Icon(Icons.public),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  final account = ref.read(accountStateProvider).store.active;
-                  Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => WebPage(
-                        title: '网页版回收站',
-                        url: '${LanzouClient.mydiskUrl}?item=recycle&action=files',
-                        cookie: account?.cookie,
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ],
-          ),
-        ],
+    final account = ref.read(accountStateProvider).store.active;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => WebPage(
+          title: '回收站',
+          url: '${LanzouClient.mydiskUrl}?item=recycle&action=files',
+          cookie: account?.cookie,
+        ),
       ),
     );
   }

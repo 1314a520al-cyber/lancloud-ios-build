@@ -83,24 +83,70 @@ class _WenshuLoginPageState extends ConsumerState<WenshuLoginPage> {
       _error = null;
     });
     try {
-      // 从 Cookie 里获取 token
-      final cookies = await CookieManager().getCookies(url: WebUri('https://www.wenshushu.cn'));
       String? token;
+      
+      // 1. 从所有 Cookie 里找 token
+      final cookies = await CookieManager().getCookies(url: WebUri('https://www.wenshushu.cn'));
       for (final cookie in cookies) {
-        if (cookie.name == 'token' || cookie.name == 'X-TOKEN') {
+        final name = cookie.name.toLowerCase();
+        if (name == 'token' || name == 'x-token' || name == 'wenshu_token' || name == 'authorization') {
           token = cookie.value;
           break;
         }
       }
-      // 也从 localStorage 里获取
+      
+      // 2. 从 localStorage 里找
       if (token == null) {
         final result = await controller.evaluateJavascript(source: '''
-          localStorage.getItem('token') || localStorage.getItem('X-TOKEN');
+          (function() {
+            var keys = ['token', 'x-token', 'X-TOKEN', 'wenshu_token', 'Authorization', 'authorization'];
+            for (var i = 0; i < keys.length; i++) {
+              var v = localStorage.getItem(keys[i]);
+              if (v) return v;
+            }
+            return null;
+          })()
         ''');
-        if (result != null && result.toString().isNotEmpty) {
-          token = result.toString().replaceAll('"', '');
+        if (result != null && result.toString().isNotEmpty && result.toString() != 'null') {
+          token = result.toString().replaceAll('"', '').replaceAll("'", '');
         }
       }
+      
+      // 3. 从 sessionStorage 里找
+      if (token == null) {
+        final result = await controller.evaluateJavascript(source: '''
+          (function() {
+            var keys = ['token', 'x-token', 'X-TOKEN', 'wenshu_token', 'Authorization', 'authorization'];
+            for (var i = 0; i < keys.length; i++) {
+              var v = sessionStorage.getItem(keys[i]);
+              if (v) return v;
+            }
+            return null;
+          })()
+        ''');
+        if (result != null && result.toString().isNotEmpty && result.toString() != 'null') {
+          token = result.toString().replaceAll('"', '').replaceAll("'", '');
+        }
+      }
+      
+      // 4. 从所有 localStorage 键值对里找
+      if (token == null) {
+        final result = await controller.evaluateJavascript(source: '''
+          (function() {
+            for (var i = 0; i < localStorage.length; i++) {
+              var key = localStorage.key(i);
+              if (key && key.toLowerCase().indexOf('token') >= 0) {
+                return localStorage.getItem(key);
+              }
+            }
+            return null;
+          })()
+        ''');
+        if (result != null && result.toString().isNotEmpty && result.toString() != 'null') {
+          token = result.toString().replaceAll('"', '').replaceAll("'", '');
+        }
+      }
+      
       if (token != null && token.isNotEmpty) {
         // 保存 token
         await WenshuAuth.instance.saveLogin(token: token);

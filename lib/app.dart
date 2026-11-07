@@ -591,7 +591,6 @@ class _RootShellState extends ConsumerState<RootShell>
     _viewDrive,
     if (showTransfers) _viewTransfers,
     if (showFavorites) _viewFavorites,
-    _viewWenshu,
     _viewProfile,
   ];
 

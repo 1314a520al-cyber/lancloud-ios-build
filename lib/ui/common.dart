@@ -3281,6 +3281,7 @@ class PropertyHeaderCard extends StatelessWidget {
                         child: Text(
                           desc,
                           key: ValueKey(desc),
+                          textAlign: TextAlign.left,
                           style: theme.textTheme.bodyMedium?.copyWith(
                             height: 1.5,
                           ),

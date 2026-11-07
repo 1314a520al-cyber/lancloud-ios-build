@@ -103,8 +103,9 @@ class LanzouClient {
         validateStatus: (s) => s != null && s < 500,
         // 连接阶段也必须限时：否则网络异常（丢包 / 半开连接）时请求会一直挂着，
         // 页面停在加载中、下拉刷新小球也收不回来
-        connectTimeout: const Duration(seconds: 20),
-        receiveTimeout: const Duration(seconds: 60),
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 30),
+        sendTimeout: const Duration(minutes: 10),
       ),
     );
     dio.interceptors.add(

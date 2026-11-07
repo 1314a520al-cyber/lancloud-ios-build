@@ -170,6 +170,57 @@ class _ProfilePageState extends riverpod.ConsumerState<ProfilePage>
     );
   }
 
+  /// 点击回收站：弹出选择原生/网页版
+  void _showRecycleBinChoice(BuildContext context) {
+    showAppSheet<void>(
+      context,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              '选择回收站',
+              style: context.m3eEmphasizedTheme.titleLarge,
+            ),
+          ),
+          SheetListGroup(
+            children: [
+              M3ePickTile.action(
+                label: '原生',
+                leading: const Icon(Icons.phone_iphone),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const RecycleBinPage()),
+                  );
+                },
+              ),
+              M3ePickTile.action(
+                label: '网页',
+                leading: const Icon(Icons.public),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  final account = ref.read(accountStateProvider).store.active;
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => WebPage(
+                        title: '网页版回收站',
+                        url: '${LanzouClient.mydiskUrl}?item=recycle&action=files',
+                        cookie: account?.cookie,
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 点顶栏空白处回到当前窗格顶部（与网盘页一致）。
   void _scrollToTop(ScrollController controller) {
     if (!controller.hasClients) return;
@@ -657,14 +708,12 @@ class _ProfilePageState extends riverpod.ConsumerState<ProfilePage>
               l10n.userCenter,
             ),
           ),
-          // 回收站
+          // 回收站：弹出选择原生/网页版
           ListTile(
             leading: const Icon(Icons.delete_outline),
             title: const Text('回收站'),
             trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const RecycleBinPage()),
-            ),
+            onTap: () => _showRecycleBinChoice(context),
           ),
         ],
       ),

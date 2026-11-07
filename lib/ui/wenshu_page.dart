@@ -91,9 +91,12 @@ class _WenshuPageState extends riverpod.ConsumerState<WenshuPage> {
     );
 
     if (result == 'login' && mounted) {
-      Navigator.of(context).push(
+      final success = await Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => const WenshuLoginPage()),
       );
+      if (success == true && mounted) {
+        await _checkLogin();
+      }
     } else if (result == 'logout' && mounted) {
       await WenshuAuth.instance.logout();
       await _checkLogin();

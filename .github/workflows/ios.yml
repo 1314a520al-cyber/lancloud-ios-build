@@ -14,7 +14,6 @@ jobs:
         with:
           channel: stable
           cache: true
-      - run: sudo xcode-select -s /Applications/Xcode_15.4.app && xcodebuild -version
       - run: flutter --version && xcodebuild -version
       - run: flutter pub get
       - name: Build iOS

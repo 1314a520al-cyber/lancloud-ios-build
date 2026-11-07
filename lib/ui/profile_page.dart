@@ -631,14 +631,33 @@ class _ProfilePageState extends riverpod.ConsumerState<ProfilePage>
   List<Widget> _singlePaneChildren(BuildContext context) {
     final l10n = context.l10n;
     return [
-      // 组 1：账号（分组小标题 + 信息卡 + 回收站）
+      // 组 1：账号（分组小标题 + 信息卡 + 网页版/个人中心/回收站）
       M3eSectionHeader(l10n.accountTitle),
       SegmentedList(
         children: [
           ProfileAccountTile(
             onSwitchAccount: () => _showAccountSwitcher(context),
           ),
-          // 只保留回收站，其他网页版/个人中心隐藏
+          // 网页版
+          ListTile(
+            leading: const Icon(Icons.public),
+            title: Text(l10n.webManagement),
+            trailing: const Icon(Icons.open_in_new),
+            onTap: () => _openWeb(context, LanzouClient.mydiskUrl, l10n.webManagement),
+          ),
+          // 个人中心
+          ListTile(
+            leading: const Icon(Icons.user_attributes),
+            title: Text(l10n.userCenter),
+            trailing: const Icon(Icons.open_in_new),
+            onTap: () => _openWeb(
+              context,
+              '${LanzouClient.apiBase}'
+              '/mydisk.php?item=profile&action=mypower',
+              l10n.userCenter,
+            ),
+          ),
+          // 回收站
           ListTile(
             leading: const Icon(Icons.delete_outline),
             title: const Text('回收站'),

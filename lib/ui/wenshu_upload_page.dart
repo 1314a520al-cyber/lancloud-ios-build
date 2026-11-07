@@ -37,11 +37,18 @@ class _WenshuUploadPageState extends riverpod.ConsumerState<WenshuUploadPage> {
       final result = await FilePicker.pickFiles();
       if (result != null && result.isNotEmpty) {
         final file = result.first;
+        final filePath = file.path;
+        int fileSize = 0;
+        if (filePath != null) {
+          try {
+            fileSize = File(filePath).lengthSync();
+          } catch (_) {}
+        }
         setState(() {
           _files.add(_FileItem(
             name: file.name,
-            path: file.path,
-            size: file.size ?? 0,
+            path: filePath,
+            size: fileSize,
           ));
         });
       }

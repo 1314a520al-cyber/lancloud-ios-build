@@ -479,7 +479,6 @@ class _RootShellState extends ConsumerState<RootShell>
   static const _viewDrive = 1;
   static const _viewTransfers = 2;
   static const _viewFavorites = 3;
-  static const _viewWenshu = 4;
   static const _viewProfile = 5;
 
   /// 当前底栏包含的视图 id（顺序即底栏顺序）。
@@ -608,7 +607,6 @@ class _RootShellState extends ConsumerState<RootShell>
     _viewDrive => const DrivePage(tabIndex: _viewDrive),
     _viewTransfers => const TransfersPage(),
     _viewFavorites => const FavoritesPage(tabIndex: _viewFavorites),
-    _viewWenshu => const WenshuPage(tabIndex: _viewWenshu),
     _ => const ProfilePage(tabIndex: _viewProfile),
   };
 
@@ -635,7 +633,6 @@ class _RootShellState extends ConsumerState<RootShell>
     _viewDrive => selected ? Icons.folder : Icons.folder_outlined,
     _viewTransfers => selected ? Icons.swap_vert : Icons.swap_vert_outlined,
     _viewFavorites => selected ? Icons.star_outline : Icons.star_border,
-    _viewWenshu => selected ? Icons.upload : Icons.upload_file,
     _ => selected ? Icons.person : Icons.person_outline,
   };
 
@@ -644,7 +641,6 @@ class _RootShellState extends ConsumerState<RootShell>
     _viewDrive => l10n.tabDrive,
     _viewTransfers => l10n.tabTransfers,
     _viewFavorites => l10n.favorite,
-    _viewWenshu => l10n.tabWenshu,
     _ => l10n.tabProfile,
   };
 

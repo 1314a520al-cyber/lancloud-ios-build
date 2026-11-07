@@ -25,6 +25,8 @@ class _WenshuLoginPageState extends ConsumerState<WenshuLoginPage> {
   double _progress = 0;
   String? _error;
 
+  InAppWebViewController? _webViewController;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -34,6 +36,17 @@ class _WenshuLoginPageState extends ConsumerState<WenshuLoginPage> {
           icon: Icon(Icons.close),
           onPressed: () => Navigator.of(context).pop(),
         ),
+        actions: [
+          // 右上角"确定"按钮：用户登录完成后点击，自动抓取 token
+          TextButton(
+            onPressed: _checking || _done ? null : () async {
+              if (_webViewController != null) {
+                await _tryCapture(_webViewController!);
+              }
+            },
+            child: const Text('确定', style: TextStyle(color: Colors.white)),
+          ),
+        ],
       ),
       body: Stack(
         children: [
@@ -44,13 +57,14 @@ class _WenshuLoginPageState extends ConsumerState<WenshuLoginPage> {
               domStorageEnabled: true,
               userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             ),
+            onWebViewCreated: (controller) {
+              _webViewController = controller;
+            },
             onProgressChanged: (controller, progress) {
               setState(() => _progress = progress / 100);
             },
             onLoadStop: (controller, url) async {
-              // 页面加载完成后，检查是否登录成功
-              if (_done) return;
-              await _tryCapture(controller);
+              // 页面加载完成后，不自动抓取，等用户点击"确定"按钮
             },
           ),
           if (_progress < 1.0)

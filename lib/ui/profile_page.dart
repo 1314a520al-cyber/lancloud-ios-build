@@ -189,7 +189,7 @@ class _ProfilePageState extends riverpod.ConsumerState<ProfilePage>
             children: [
               M3ePickTile.action(
                 label: '原生',
-                leading: const Icon(Icons.phone_iphone),
+                leading: const Icon(Icons.smartphone),
                 onTap: () {
                   Navigator.of(context).pop();
                   Navigator.of(context).push(

@@ -34,7 +34,7 @@ class _WenshuUploadPageState extends riverpod.ConsumerState<WenshuUploadPage> {
 
   Future<void> _pickFile() async {
     try {
-      final result = await FilePicker.platform.pickFiles();
+      final result = await FilePicker.pickFiles();
       if (result != null && result.files.isNotEmpty) {
         final file = result.files.first;
         setState(() {

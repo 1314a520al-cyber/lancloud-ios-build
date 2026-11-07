@@ -31,7 +31,7 @@ class _WenshuLoginPageState extends ConsumerState<WenshuLoginPage> {
       appBar: AppBar(
         title: const Text('文叔叔登录'),
         leading: IconButton(
-          icon: const Icon(Icons.close),
+          icon: Icon(Icons.close),
           onPressed: () => Navigator.of(context).pop(),
         ),
       ),
@@ -103,7 +103,7 @@ class _WenshuLoginPageState extends ConsumerState<WenshuLoginPage> {
       }
       if (token != null && token.isNotEmpty) {
         // 保存 token
-        await WenshuAuth.instance.init(token);
+        await WenshuAuth.instance.saveLogin(token: token);
         setState(() => _done = true);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(

@@ -98,10 +98,10 @@ class _WenshuTaskListPageState extends ConsumerState<WenshuTaskListPage> {
                       itemBuilder: (context, index) {
                         final task = _tasks[index];
                         return ListTile(
-                          leading: const Icon(Icons.insert_drive_file),
-                          title: Text(task.name),
-                          subtitle: Text('大小: ${(task.size / 1024 / 1024).toStringAsFixed(1)}MB'),
-                          trailing: const Icon(Icons.chevron_right),
+                          leading: Icon(Icons.insert_drive_file),
+                          title: Text('任务 ${task.tid}'),
+                          subtitle: Text('ID: ${task.ufileid}'),
+                          trailing: Icon(Icons.chevron_right),
                           onTap: () {
                             // TODO: 打开任务详情
                           },
